@@ -27,6 +27,9 @@ function generateSafeImageName(prefix = '', rawFileName = '') {
     const yy = String(yyyy).slice(-2);
     return `proj[${dd}-${mm}-${yy}][${codeimg}]${ext}`;
   }
+  if (prefix === 'device') {
+    return `device[${dd}-${mm}-${yyyy}][${codeimg}]${ext}`;
+  }
   return `[${dd}-${mm}-${yyyy}][${codeimg}]${ext}`;
 }
 
@@ -832,6 +835,191 @@ export function createApiRouter(broadcastWs) {
       res.json({ success: true, message: 'Đã xoá dự án và hình ảnh thành công' });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message || 'Lỗi xoá dự án' });
+    }
+  });
+
+  // 17. Quản lý danh mục thiết bị & vật tư (bảng device)
+  // Lấy danh sách thiết bị
+  router.get('/device', async (req, res) => {
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS device (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          time DATETIME DEFAULT CURRENT_TIMESTAMP,
+          brand VARCHAR(255) NOT NULL,
+          name VARCHAR(255) NOT NULL,
+          image VARCHAR(500) DEFAULT NULL,
+          status INT NOT NULL DEFAULT 1
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `);
+
+      const [rows] = await pool.query('SELECT * FROM device ORDER BY id DESC');
+      res.json({ success: true, data: rows });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message || 'Lỗi truy vấn bảng device' });
+    }
+  });
+
+  // Thêm thiết bị mới
+  router.post('/device', async (req, res) => {
+    const { brand, name, imageBase64, imageFileName } = req.body || {};
+    if (!brand || !name) {
+      return res.status(400).json({ success: false, message: 'Vui lòng nhập đầy đủ Hãng sản xuất và Tên thiết bị.' });
+    }
+
+    try {
+      let imageDbPath = '';
+      if (imageBase64 && typeof imageBase64 === 'string') {
+        const filename = generateSafeImageName('device', imageFileName);
+
+        // Thư mục lưu ảnh uploads/device
+        const uploadsDeviceDir = path.resolve(__dirname, '../../uploads/device');
+        if (!fs.existsSync(uploadsDeviceDir)) {
+          fs.mkdirSync(uploadsDeviceDir, { recursive: true });
+        }
+        const filePath = path.join(uploadsDeviceDir, filename);
+        const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+        await fs.promises.writeFile(filePath, Buffer.from(base64Data, 'base64'));
+
+        // Lưu bản sao vào uploads/news để đảm bảo tương thích đường dẫn \AAA_Backend\uploads\news\...
+        const uploadsNewsDir = path.resolve(__dirname, '../../uploads/news');
+        if (!fs.existsSync(uploadsNewsDir)) {
+          fs.mkdirSync(uploadsNewsDir, { recursive: true });
+        }
+        const newsFilePath = path.join(uploadsNewsDir, filename);
+        try {
+          await fs.promises.copyFile(filePath, newsFilePath);
+        } catch {
+          // ignore copy error
+        }
+
+        // Cột image lưu đường dẫn \AAA_Backend\uploads\news\device[dd-mm-yyyy][codeimg]
+        imageDbPath = `\\AAA_Backend\\uploads\\news\\${filename}`;
+      }
+
+      const [result] = await pool.query(
+        'INSERT INTO device (time, brand, name, image, status) VALUES (NOW(), ?, ?, ?, 1)',
+        [brand.trim(), name.trim(), imageDbPath || null]
+      );
+
+      res.json({
+        success: true,
+        message: 'Đăng thiết bị thành công',
+        id: result.insertId,
+        image: imageDbPath
+      });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message || 'Lỗi lưu thiết bị' });
+    }
+  });
+
+  // Cập nhật thông tin thiết bị (sửa brand, name, status, giữ nguyên image hoặc cập nhật nếu có)
+  router.put('/device/:id', async (req, res) => {
+    const { id } = req.params;
+    const { brand, name, status, imageBase64, imageFileName } = req.body || {};
+
+    if (!brand || !name) {
+      return res.status(400).json({ success: false, message: 'Vui lòng nhập đầy đủ Hãng sản xuất và Tên thiết bị.' });
+    }
+
+    try {
+      let imageDbPath = undefined;
+      if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.startsWith('data:image')) {
+        const filename = generateSafeImageName('device', imageFileName);
+        const uploadsDeviceDir = path.resolve(__dirname, '../../uploads/device');
+        if (!fs.existsSync(uploadsDeviceDir)) {
+          fs.mkdirSync(uploadsDeviceDir, { recursive: true });
+        }
+        const filePath = path.join(uploadsDeviceDir, filename);
+        const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+        await fs.promises.writeFile(filePath, Buffer.from(base64Data, 'base64'));
+
+        const uploadsNewsDir = path.resolve(__dirname, '../../uploads/news');
+        if (!fs.existsSync(uploadsNewsDir)) {
+          fs.mkdirSync(uploadsNewsDir, { recursive: true });
+        }
+        try {
+          await fs.promises.copyFile(filePath, path.join(uploadsNewsDir, filename));
+        } catch {
+          // ignore
+        }
+
+        imageDbPath = `\\AAA_Backend\\uploads\\news\\${filename}`;
+      }
+
+      if (imageDbPath !== undefined) {
+        await pool.query(
+          'UPDATE device SET brand = ?, name = ?, status = ?, image = ? WHERE id = ?',
+          [brand.trim(), name.trim(), Number(status) || 1, imageDbPath, id]
+        );
+      } else {
+        await pool.query(
+          'UPDATE device SET brand = ?, name = ?, status = ? WHERE id = ?',
+          [brand.trim(), name.trim(), Number(status) || 1, id]
+        );
+      }
+
+      res.json({ success: true, message: 'Cập nhật thông tin thiết bị thành công' });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message || 'Lỗi cập nhật thiết bị' });
+    }
+  });
+
+  // Ẩn thiết bị (status = 2)
+  router.patch('/device/:id/hide', async (req, res) => {
+    const { id } = req.params;
+    try {
+      await pool.query('UPDATE device SET status = 2 WHERE id = ?', [id]);
+      res.json({ success: true, message: 'Đã ẩn thiết bị thành công' });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message || 'Lỗi ẩn thiết bị' });
+    }
+  });
+
+  // Thay đổi trạng thái thiết bị linh hoạt (1: Đăng bài, 2: Đang ẩn)
+  router.patch('/device/:id/status', async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body || {};
+    try {
+      await pool.query('UPDATE device SET status = ? WHERE id = ?', [Number(status) || 1, id]);
+      res.json({ success: true, message: 'Đã cập nhật trạng thái thiết bị' });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message || 'Lỗi cập nhật trạng thái thiết bị' });
+    }
+  });
+
+  // Xoá thiết bị và hình ảnh tương ứng
+  router.delete('/device/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+      const [rows] = await pool.query('SELECT image FROM device WHERE id = ?', [id]);
+      if (rows && rows.length > 0 && rows[0].image) {
+        const imgPath = rows[0].image;
+        const filename = path.basename(imgPath);
+
+        const deviceFile = path.resolve(__dirname, '../../uploads/device', filename);
+        if (fs.existsSync(deviceFile)) {
+          try {
+            await fs.promises.unlink(deviceFile);
+          } catch {
+            // ignore
+          }
+        }
+
+        const newsFile = path.resolve(__dirname, '../../uploads/news', filename);
+        if (fs.existsSync(newsFile)) {
+          try {
+            await fs.promises.unlink(newsFile);
+          } catch {
+            // ignore
+          }
+        }
+      }
+
+      await pool.query('DELETE FROM device WHERE id = ?', [id]);
+      res.json({ success: true, message: 'Đã xoá thiết bị và hình ảnh thành công' });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message || 'Lỗi xoá thiết bị' });
     }
   });
 

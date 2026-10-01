@@ -95,6 +95,10 @@ const projectUploadsPath = path.join(uploadsPath, 'project');
 if (!fs.existsSync(projectUploadsPath)) {
   fs.mkdirSync(projectUploadsPath, { recursive: true });
 }
+const deviceUploadsPath = path.join(uploadsPath, 'device');
+if (!fs.existsSync(deviceUploadsPath)) {
+  fs.mkdirSync(deviceUploadsPath, { recursive: true });
+}
 app.use('/uploads', express.static(uploadsPath));
 
 // Phục vụ giao diện tĩnh từ bản build AAA_Web/dist nếu có

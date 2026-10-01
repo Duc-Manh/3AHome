@@ -121,3 +121,14 @@ CREATE TABLE IF NOT EXISTS `project` (
   `status` INT NOT NULL DEFAULT 1
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 9. Bảng device: Quản lý danh mục vật tư & sản phẩm thiết bị 3AHOME
+CREATE TABLE IF NOT EXISTS `device` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `time` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  `brand` VARCHAR(255) NOT NULL,
+  `name` VARCHAR(255) NOT NULL,
+  `image` VARCHAR(500) DEFAULT NULL,
+  `status` INT NOT NULL DEFAULT 1
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
