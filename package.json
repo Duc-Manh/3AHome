@@ -1,0 +1,28 @@
+{
+  "name": "aaa-backend",
+  "version": "1.0.0",
+  "description": "Backend API & Gateway for AAA Smart System (Web, Mobile, IoT)",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mysql2": "^3.12.0",
+    "ws": "^8.18.0"
+  },
+  "keywords": [
+    "iot",
+    "smart-home",
+    "express",
+    "mysql",
+    "backend"
+  ],
+  "author": "",
+  "license": "ISC"
+}
