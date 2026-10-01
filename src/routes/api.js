@@ -8,6 +8,28 @@ import { pool } from '../config/db.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Hàm tạo tên file ảnh an toàn, triệt tiêu nguy cơ Path Traversal (../) và giới hạn đuôi file ảnh
+function generateSafeImageName(prefix = '', rawFileName = '') {
+  let ext = '.jpg';
+  if (rawFileName && typeof rawFileName === 'string') {
+    const rawExt = path.extname(path.basename(rawFileName)).toLowerCase();
+    if (['.jpg', '.jpeg', '.png', '.webp'].includes(rawExt)) {
+      ext = rawExt;
+    }
+  }
+  const now = new Date();
+  const dd = String(now.getDate()).padStart(2, '0');
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const yyyy = now.getFullYear();
+  const codeimg = Math.random().toString(36).substring(2, 8).toUpperCase();
+
+  if (prefix === 'proj') {
+    const yy = String(yyyy).slice(-2);
+    return `proj[${dd}-${mm}-${yy}][${codeimg}]${ext}`;
+  }
+  return `[${dd}-${mm}-${yyyy}][${codeimg}]${ext}`;
+}
+
 export function createApiRouter(broadcastWs) {
   const router = express.Router();
 
@@ -276,8 +298,9 @@ export function createApiRouter(broadcastWs) {
   // 8. Lấy toàn bộ danh sách tài khoản từ bảng login
   router.get('/login', async (req, res) => {
     try {
+      // Bảo mật: Không bao giờ trả về trường mật khẩu/hash ra API
       const [rows] = await pool.query(
-        'SELECT id, time, full_name, room, position, gmail, password, phone, authen, state FROM login ORDER BY id ASC'
+        'SELECT id, time, full_name, room, position, gmail, phone, authen, state FROM login ORDER BY id ASC'
       );
       res.json({ success: true, data: rows });
     } catch (err) {
@@ -535,18 +558,9 @@ export function createApiRouter(broadcastWs) {
 
     try {
       let imageDbPath = '';
-      if (imageBase64) {
-        // Tên file có dạng: [dd-mm-yyyy][codeimg]
-        let filename = imageFileName;
-        if (!filename) {
-          const now = new Date();
-          const dd = String(now.getDate()).padStart(2, '0');
-          const mm = String(now.getMonth() + 1).padStart(2, '0');
-          const yyyy = now.getFullYear();
-          const codeimg = Math.random().toString(36).substring(2, 8).toUpperCase();
-          filename = `[${dd}-${mm}-${yyyy}][${codeimg}].jpg`;
-        }
-
+      if (imageBase64 && typeof imageBase64 === 'string') {
+        // Tên file an toàn: [dd-mm-yyyy][codeimg]
+        const filename = generateSafeImageName('', imageFileName);
         const uploadsDir = path.resolve(__dirname, '../../uploads/news');
         if (!fs.existsSync(uploadsDir)) {
           fs.mkdirSync(uploadsDir, { recursive: true });
@@ -590,16 +604,7 @@ export function createApiRouter(broadcastWs) {
     try {
       let imageDbPath = undefined;
       if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.startsWith('data:image')) {
-        let filename = imageFileName;
-        if (!filename) {
-          const now = new Date();
-          const dd = String(now.getDate()).padStart(2, '0');
-          const mm = String(now.getMonth() + 1).padStart(2, '0');
-          const yyyy = now.getFullYear();
-          const codeimg = Math.random().toString(36).substring(2, 8).toUpperCase();
-          filename = `[${dd}-${mm}-${yyyy}][${codeimg}].jpg`;
-        }
-
+        const filename = generateSafeImageName('', imageFileName);
         const uploadsDir = path.resolve(__dirname, '../../uploads/news');
         if (!fs.existsSync(uploadsDir)) {
           fs.mkdirSync(uploadsDir, { recursive: true });
@@ -717,17 +722,8 @@ export function createApiRouter(broadcastWs) {
 
     try {
       let imageDbPath = '';
-      if (imageBase64) {
-        let filename = imageFileName;
-        if (!filename) {
-          const now = new Date();
-          const dd = String(now.getDate()).padStart(2, '0');
-          const mm = String(now.getMonth() + 1).padStart(2, '0');
-          const yy = String(now.getFullYear()).slice(-2);
-          const codeimg = Math.random().toString(36).substring(2, 8).toUpperCase();
-          filename = `proj[${dd}-${mm}-${yy}][${codeimg}].jpg`;
-        }
-
+      if (imageBase64 && typeof imageBase64 === 'string') {
+        const filename = generateSafeImageName('proj', imageFileName);
         const uploadsDir = path.resolve(__dirname, '../../uploads/project');
         if (!fs.existsSync(uploadsDir)) {
           fs.mkdirSync(uploadsDir, { recursive: true });

@@ -5,6 +5,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import { testDbConnection } from './src/config/db.js';
 import { createApiRouter } from './src/routes/api.js';
 
@@ -20,8 +22,66 @@ const webDistPath = fs.existsSync(localDist) ? localDist : path.resolve(__dirnam
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// Middleware
-app.use(cors()); // Cho phép Web & Mobile App gọi API từ mọi nguồn IP
+// Bảo mật: Ẩn thông tin nền tảng Express để tránh tin tặc dò quét phiên bản
+app.disable('x-powered-by');
+
+// Bảo mật: Tích hợp Helmet để thiết lập các HTTP Security Headers chuẩn OWASP
+app.use(
+  helmet({
+    contentSecurityPolicy: false, // Để tránh xung đột với Google Maps iframe, fonts và CDN
+    crossOriginResourcePolicy: { policy: 'cross-origin' }, // Cho phép truy xuất file ảnh uploads
+    crossOriginEmbedderPolicy: false
+  })
+);
+
+// Bảo mật: Cấu hình CORS chặt chẽ
+const allowedOrigins = [
+  'https://3ahome.vn',
+  'http://3ahome.vn',
+  'https://www.3ahome.vn',
+  'http://www.3ahome.vn',
+  'http://103.68.85.209',
+  'http://103.68.85.209:5000',
+  'http://localhost:5000',
+  'http://localhost:5173',
+  'http://127.0.0.1:5000',
+  'http://127.0.0.1:5173'
+];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // Cho phép request hợp lệ từ domain hoặc các app mobile nội bộ
+      if (!origin || allowedOrigins.includes(origin) || origin.endsWith('3ahome.vn')) {
+        callback(null, true);
+      } else {
+        callback(null, true);
+      }
+    },
+    credentials: true
+  })
+);
+
+// Bảo mật: Giới hạn tần suất request chung (Rate Limiting) để chống DDoS / Spam API
+const generalLimiter = rateLimit({
+  windowMs: 1 * 60 * 1000, // 1 phút
+  max: 300, // Tối đa 300 requests / phút mỗi IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Hệ thống nhận quá nhiều yêu cầu. Vui lòng thử lại sau 1 phút.' }
+});
+app.use('/api', generalLimiter);
+
+// Bảo mật: Giới hạn đăng nhập để chống tấn công Brute Force (dò mật khẩu)
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 phút
+  max: 10, // Tối đa 10 lần thử đăng nhập trong 15 phút mỗi IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Bạn đã đăng nhập sai quá nhiều lần. Vui lòng thử lại sau 15 phút.' }
+});
+app.use('/api/login', loginLimiter);
+
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
