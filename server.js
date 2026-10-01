@@ -28,11 +28,59 @@ app.set('trust proxy', 1);
 // Bảo mật: Ẩn thông tin nền tảng Express để tránh tin tặc dò quét phiên bản
 app.disable('x-powered-by');
 
-// Bảo mật: Tích hợp Helmet để thiết lập các HTTP Security Headers chuẩn OWASP
+// Bảo mật: Tự động chuyển hướng toàn bộ HTTP sang HTTPS chuẩn 301
+app.use((req, res, next) => {
+  const proto = req.headers['x-forwarded-proto'];
+  if (proto && proto !== 'https') {
+    return res.redirect(301, `https://${req.headers.host}${req.url}`);
+  }
+  next();
+});
+
+// Bảo mật: Tích hợp Helmet để thiết lập các HTTP Security Headers chuẩn OWASP & Mozilla Observatory
 app.use(
   helmet({
-    contentSecurityPolicy: false, // Để tránh xung đột với Google Maps iframe, fonts và CDN
-    crossOriginResourcePolicy: { policy: 'cross-origin' }, // Cho phép truy xuất file ảnh uploads
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "'unsafe-eval'",
+          'https://cdnjs.cloudflare.com',
+          'https://cdn.jsdelivr.net',
+          'https://*.cloudflare.com',
+          'https://*.google.com',
+          'https://*.gstatic.com'
+        ],
+        styleSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          'https://fonts.googleapis.com',
+          'https://cdnjs.cloudflare.com'
+        ],
+        fontSrc: ["'self'", 'data:', 'https://fonts.gstatic.com'],
+        imgSrc: ["'self'", 'data:', 'blob:', 'https:', 'http:'],
+        mediaSrc: ["'self'", 'data:', 'blob:', 'https:'],
+        connectSrc: ["'self'", 'ws:', 'wss:', 'https:', 'http:'],
+        frameSrc: [
+          "'self'",
+          'https://www.google.com',
+          'https://maps.google.com',
+          'https://www.youtube.com'
+        ],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+        upgradeInsecureRequests: []
+      }
+    },
+    hsts: {
+      maxAge: 31536000,
+      includeSubDomains: true,
+      preload: true
+    },
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
     crossOriginEmbedderPolicy: false
   })
 );
