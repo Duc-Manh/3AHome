@@ -22,6 +22,9 @@ const webDistPath = fs.existsSync(localDist) ? localDist : path.resolve(__dirnam
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Cấu hình tin cậy proxy Cloudflare (để nhận đúng IP người dùng thực qua X-Forwarded-For)
+app.set('trust proxy', 1);
+
 // Bảo mật: Ẩn thông tin nền tảng Express để tránh tin tặc dò quét phiên bản
 app.disable('x-powered-by');
 
@@ -68,6 +71,7 @@ const generalLimiter = rateLimit({
   max: 300, // Tối đa 300 requests / phút mỗi IP
   standardHeaders: true,
   legacyHeaders: false,
+  validate: false, // Tương thích hoàn toàn với Cloudflare Reverse Proxy
   message: { success: false, message: 'Hệ thống nhận quá nhiều yêu cầu. Vui lòng thử lại sau 1 phút.' }
 });
 app.use('/api', generalLimiter);
@@ -78,6 +82,7 @@ const loginLimiter = rateLimit({
   max: 10, // Tối đa 10 lần thử đăng nhập trong 15 phút mỗi IP
   standardHeaders: true,
   legacyHeaders: false,
+  validate: false, // Tương thích hoàn toàn với Cloudflare Reverse Proxy
   message: { success: false, message: 'Bạn đã đăng nhập sai quá nhiều lần. Vui lòng thử lại sau 15 phút.' }
 });
 app.use('/api/login', loginLimiter);
