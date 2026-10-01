@@ -106,8 +106,18 @@ if (!fs.existsSync(deviceUploadsPath)) {
 }
 app.use('/uploads', express.static(uploadsPath));
 
-// Phục vụ giao diện tĩnh từ bản build AAA_Web/dist nếu có
-app.use(express.static(webDistPath));
+// Phục vụ giao diện tĩnh từ bản build AAA_Web/dist nếu có (không lưu cache index.html để luôn nhận code mới)
+app.use(
+  express.static(webDistPath, {
+    setHeaders: (res, filePath) => {
+      if (filePath.endsWith('.html')) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+      }
+    }
+  })
+);
 
 // Tạo HTTP Server kết hợp WebSocket
 const server = http.createServer(app);
@@ -147,6 +157,9 @@ app.get('*', (req, res, next) => {
     return next();
   }
   const indexPath = path.join(webDistPath, 'index.html');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   res.sendFile(indexPath, (err) => {
     if (err) {
       res.json({
