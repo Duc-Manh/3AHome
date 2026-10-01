@@ -545,7 +545,60 @@ export function createApiRouter(broadcastWs) {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `);
 
-      const [rows] = await pool.query('SELECT * FROM news ORDER BY id DESC');
+      let [rows] = await pool.query('SELECT * FROM news ORDER BY id DESC');
+      if (rows.length === 0) {
+        const seedNews = [
+          [
+            'Xu hướng công nghệ',
+            'Tối ưu hoá năng lượng toà nhà thông minh với giải pháp AI & BMS thế hệ mới',
+            'Ứng dụng thuật toán máy học phân tích hành vi tiêu thụ nhiệt và điện thời gian thực, giúp cắt giảm đến 35% chi phí năng lượng vận hành hệ thống Chiller và chiếu sáng toà nhà cao tầng.',
+            'https://images.unsplash.com/photo-1518770660439-4636190af475?auto=format&fit=crop&w=1000&q=80',
+            'Quản trị viên',
+            1
+          ],
+          [
+            'Hợp tác chiến lược',
+            '3AHOME ký kết hợp tác chiến lược cung ứng thiết bị BACnet IP chuẩn quốc tế',
+            'Mở rộng mạng lưới phân phối thiết bị điều khiển lập trình DDC và cảm biến chuyên dụng cho các đại dự án cao ốc tại Việt Nam.',
+            'https://images.unsplash.com/photo-1577495508048-b635879837f1?auto=format&fit=crop&w=600&q=80',
+            'Ban giám đốc',
+            1
+          ],
+          [
+            'Giải pháp kỹ thuật',
+            'Tiêu chuẩn điều áp buồng thang và an toàn PCCC liên động trong nhà cao tầng',
+            'Hướng dẫn giải pháp tích hợp cảm biến khói ống gió và van hút khói hành lang theo quy chuẩn an toàn PCCC mới nhất.',
+            'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?auto=format&fit=crop&w=600&q=80',
+            'Phòng kỹ thuật',
+            1
+          ],
+          [
+            'Hội thảo & Sự kiện',
+            'Hội thảo chuyên đề: Chuyển đổi số trong quản lý vận hành toà nhà xanh LEED',
+            'Chia sẻ kinh nghiệm thực tiễn từ các chuyên gia hàng đầu về ứng dụng chuẩn giao tiếp mở BACnet MS/TP và Modbus RTU.',
+            'https://images.unsplash.com/photo-1545324418-cc1a3fa10c00?auto=format&fit=crop&w=600&q=80',
+            'Ban truyền thông',
+            1
+          ],
+          [
+            'Công nghệ mới',
+            'Ứng dụng IoT & AI trong bảo trì dự đoán hệ thống bơm cấp thoát nước và Chiller',
+            'Giảm thiểu 45% thời gian ngừng trệ kỹ thuật nhờ giám sát độ rung, nhiệt độ động cơ và cảnh báo hỏng hóc sớm.',
+            'https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=600&q=80',
+            'Kỹ sư R&D',
+            1
+          ]
+        ];
+
+        for (const n of seedNews) {
+          await pool.query(
+            'INSERT INTO news (time, topic, title, content, image, author, status) VALUES (NOW(), ?, ?, ?, ?, ?, ?)',
+            n
+          );
+        }
+        const [seededRows] = await pool.query('SELECT * FROM news ORDER BY id DESC');
+        rows = seededRows;
+      }
       res.json({ success: true, data: rows });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message || 'Lỗi truy vấn bảng news' });
@@ -707,7 +760,80 @@ export function createApiRouter(broadcastWs) {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
       `);
 
-      const [rows] = await pool.query('SELECT * FROM project ORDER BY id DESC');
+      let [rows] = await pool.query('SELECT * FROM project ORDER BY id DESC');
+      if (rows.length === 0) {
+        const seedProjects = [
+          [
+            'Khu biệt thự cao cấp & Smart Villa',
+            'Dự án khu biệt thự sinh thái Danang Pearl - Ngũ Hành Sơn, Đà Nẵng',
+            'Triển khai giải pháp Smart Home toàn diện cho quần thể biệt thự sinh thái Danang Pearl: điều khiển chiếu sáng thông minh, điều hoà trung tâm VRV, quản lý năng lượng và an ninh đa lớp.',
+            'Đà Nẵng',
+            '2023 - 2024',
+            '2023 - 2024',
+            '/AAA_Backend/uploads/project/proj[25-09-24][DANANG1].webp',
+            1
+          ],
+          [
+            'Cao ốc thương mại & Nhà máy',
+            'Nhà máy Kim Long Motor Huế',
+            'Cung cấp và lắp đặt hệ thống BMS cho nhà máy sản xuất ô tô Kim Long Motor.',
+            'Huế',
+            '2025',
+            '2025',
+            '/AAA_Backend/uploads/project/proj[25-09-24][KIMLONG2].webp',
+            1
+          ],
+          [
+            'Trung tâm phức hợp',
+            'Trung tâm sinh học thành phố Đà Nẵng',
+            'Cung cấp và lắp đặt hệ thống BMS cho Trung tâm sinh học Đà Nẵng.',
+            'Đà Nẵng',
+            '2025',
+            '2025',
+            '/AAA_Backend/uploads/project/proj[25-09-24][SINHHOC3].webp',
+            1
+          ],
+          [
+            'Văn phòng LEED Platinum',
+            'Công viên phát triển phần mềm số 2 Đà Nẵng',
+            'Cung cấp và lắp đặt hệ thống BMS cho Danang Software Park 2.',
+            'Đà Nẵng',
+            '2024 - 2025',
+            '2024 - 2025',
+            '/AAA_Backend/uploads/project/proj[25-09-24][DSPARK4].webp',
+            1
+          ],
+          [
+            'Nhà máy & Phòng sạch',
+            'Nhà máy Thạch Anh - Huế',
+            'Cung cấp thiết bị và lập trình hệ thống quản lý toà nhà BMS.',
+            'Huế',
+            '2023',
+            '2023',
+            '/AAA_Backend/uploads/project/proj[25-09-24][THANH5].webp',
+            1
+          ],
+          [
+            'Cao ốc biểu tượng',
+            'Toà tháp Landmark 81 - Vinhomes Central Park',
+            'Cung cấp và tích hợp cảm biến áp suất gió, nước chuyên dụng cùng hệ thống van điều khiển HVAC tải lạnh lớn tầng cao.',
+            'Bình Thạnh, TP. Hồ Chí Minh',
+            '2022 - 2023',
+            '2022 - 2023',
+            '/AAA_Backend/uploads/project/proj[25-09-24][LMARK6].webp',
+            1
+          ]
+        ];
+
+        for (const p of seedProjects) {
+          await pool.query(
+            'INSERT INTO project (type, title, content, place, year, start, image, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            p
+          );
+        }
+        const [seededRows] = await pool.query('SELECT * FROM project ORDER BY id DESC');
+        rows = seededRows;
+      }
       res.json({ success: true, data: rows });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message || 'Lỗi truy vấn bảng project' });
