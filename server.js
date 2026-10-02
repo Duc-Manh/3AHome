@@ -153,6 +153,7 @@ if (!fs.existsSync(deviceUploadsPath)) {
   fs.mkdirSync(deviceUploadsPath, { recursive: true });
 }
 app.use('/uploads', express.static(uploadsPath));
+app.use('/AAA_Backend/uploads', express.static(uploadsPath));
 
 // Phục vụ giao diện tĩnh từ bản build AAA_Web/dist nếu có (không lưu cache index.html để luôn nhận code mới)
 app.use(

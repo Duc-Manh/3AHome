@@ -28,7 +28,8 @@ function generateSafeImageName(prefix = '', rawFileName = '') {
     return `proj[${dd}-${mm}-${yy}][${codeimg}]${ext}`;
   }
   if (prefix === 'device') {
-    return `device[${dd}-${mm}-${yyyy}][${codeimg}]${ext}`;
+    const yy = String(yyyy).slice(-2);
+    return `device[${dd}-${mm}-${yy}][${codeimg}]${ext}`;
   }
   return `[${dd}-${mm}-${yyyy}][${codeimg}]${ext}`;
 }
@@ -1027,8 +1028,8 @@ export function createApiRouter(broadcastWs) {
           // ignore copy error
         }
 
-        // Cột image lưu đường dẫn \AAA_Backend\uploads\news\device[dd-mm-yyyy][codeimg]
-        imageDbPath = `\\AAA_Backend\\uploads\\news\\${filename}`;
+        // Cột image lưu đường dẫn /AAA_Backend/uploads/device/device[dd-mm-yy][codeimg]
+        imageDbPath = `/AAA_Backend/uploads/device/${filename}`;
       }
 
       const [result] = await pool.query(
@@ -1078,7 +1079,7 @@ export function createApiRouter(broadcastWs) {
           // ignore
         }
 
-        imageDbPath = `\\AAA_Backend\\uploads\\news\\${filename}`;
+        imageDbPath = `/AAA_Backend/uploads/device/${filename}`;
       }
 
       if (imageDbPath !== undefined) {
