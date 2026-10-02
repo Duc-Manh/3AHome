@@ -280,6 +280,17 @@ export function createApiRouter(broadcastWs) {
         return res.status(401).json({ success: false, message: 'Gmail hoặc Mật khẩu không chính xác.' });
       }
 
+      // Cập nhật trạng thái và ghi log đăng nhập vào user_activity_logs
+      try {
+        await pool.query('UPDATE login SET last_online = NOW() WHERE id = ?', [user.id]);
+        await pool.query(
+          'INSERT INTO user_activity_logs (login_id, action_type, module, created_at) VALUES (?, "LOGIN", "overview", NOW())',
+          [user.id]
+        );
+      } catch {
+        // ignore log error
+      }
+
       return res.json({
         success: true,
         message: 'Đăng nhập thành công',
@@ -393,6 +404,182 @@ export function createApiRouter(broadcastWs) {
       res.json({ success: true, message: `Đã đặt lại mật khẩu về "${newPassword}" thành công!` });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message || 'Lỗi reset mật khẩu' });
+    }
+  });
+
+  // 12.1. Ghi nhận hoạt động đăng nhập, ping online và truy cập danh mục
+  router.post('/track-activity', async (req, res) => {
+    const { loginId, actionType = 'PING', module = 'overview' } = req.body || {};
+    if (!loginId) {
+      return res.status(400).json({ success: false, message: 'Thiếu loginId' });
+    }
+
+    try {
+      // Cập nhật thời điểm online gần nhất trong bảng login
+      await pool.query('UPDATE login SET last_online = NOW() WHERE id = ?', [loginId]);
+
+      // Ghi log hoạt động
+      await pool.query(
+        'INSERT INTO user_activity_logs (login_id, action_type, module, created_at) VALUES (?, ?, ?, NOW())',
+        [loginId, actionType, module]
+      );
+
+      res.json({ success: true });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message || 'Lỗi ghi nhận hoạt động' });
+    }
+  });
+
+  // 12.2. Thống kê toàn diện hoạt động nhân sự (Online thời gian thực, lượt online ngày/tuần/tháng/năm, và mốc thời gian vào 7 danh mục dưới dạng JSON)
+  router.get('/user-stats', async (req, res) => {
+    try {
+      // Đảm bảo bảng user_activity_logs tồn tại
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS user_activity_logs (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          login_id INT NOT NULL,
+          action_type VARCHAR(50) NOT NULL,
+          module VARCHAR(50) NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          INDEX idx_login_act (login_id, action_type, module, created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      // Lấy danh sách tài khoản
+      const [users] = await pool.query(`
+        SELECT id, time, full_name, room, position, gmail, phone, authen, state, last_online
+        FROM login
+        ORDER BY id ASC
+      `);
+
+      // Lấy nhật ký hoạt động
+      const [logs] = await pool.query(`
+        SELECT login_id, action_type, module, created_at
+        FROM user_activity_logs
+        ORDER BY created_at DESC
+      `);
+
+      const now = new Date();
+      const ONLINE_THRESHOLD_MS = 2 * 60 * 1000; // 2 phút (120 giây)
+
+      const MODULE_KEYS = [
+        { key: 'overview', name: 'Tổng quan' },
+        { key: 'projects', name: 'Dự án triển khai' },
+        { key: 'news', name: 'Tin tức truyền thông' },
+        { key: 'supplies', name: 'Vật tư thiết bị' },
+        { key: 'customers', name: 'Khách hàng' },
+        { key: 'finance', name: 'Tài chính kế toán' },
+        { key: 'tasks', name: 'Quản lý công việc' }
+      ];
+
+      const stats = users.map((u) => {
+        const userLogs = logs.filter((l) => Number(l.login_id) === Number(u.id));
+
+        // Kiểm tra trạng thái Online
+        let isOnline = false;
+        if (u.last_online) {
+          const lastOnlineDate = new Date(u.last_online);
+          if (!isNaN(lastOnlineDate.getTime())) {
+            isOnline = (now.getTime() - lastOnlineDate.getTime()) <= ONLINE_THRESHOLD_MS;
+          }
+        }
+
+        // Lọc các log phiên đăng nhập / hoạt động (LOGIN)
+        const loginLogs = userLogs.filter((l) => l.action_type === 'LOGIN');
+
+        const todayCount = loginLogs.filter((l) => {
+          const d = new Date(l.created_at);
+          return d.toDateString() === now.toDateString();
+        }).length;
+
+        // Tính ngày đầu tuần (Thứ 2)
+        const startOfWeek = new Date(now);
+        const day = startOfWeek.getDay() || 7;
+        startOfWeek.setDate(startOfWeek.getDate() - day + 1);
+        startOfWeek.setHours(0, 0, 0, 0);
+
+        const weekCount = loginLogs.filter((l) => new Date(l.created_at) >= startOfWeek).length;
+
+        const monthCount = loginLogs.filter((l) => {
+          const d = new Date(l.created_at);
+          return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+        }).length;
+
+        const yearCount = loginLogs.filter((l) => {
+          const d = new Date(l.created_at);
+          return d.getFullYear() === now.getFullYear();
+        }).length;
+
+        // Thống kê 7 danh mục
+        const modulesData = {};
+        let totalModuleVisits = 0;
+
+        MODULE_KEYS.forEach(({ key, name }) => {
+          const modLogs = userLogs.filter((l) => l.action_type === 'VISIT_PAGE' && l.module === key);
+          const count = modLogs.length;
+          totalModuleVisits += count;
+
+          const timestamps = modLogs.map((l) => {
+            const d = new Date(l.created_at);
+            if (!isNaN(d.getTime())) {
+              const hh = String(d.getHours()).padStart(2, '0');
+              const mm = String(d.getMinutes()).padStart(2, '0');
+              const ss = String(d.getSeconds()).padStart(2, '0');
+              const dd = String(d.getDate()).padStart(2, '0');
+              const MM = String(d.getMonth() + 1).padStart(2, '0');
+              const yyyy = d.getFullYear();
+              return `${hh}:${mm}:${ss} ${dd}/${MM}/${yyyy}`;
+            }
+            return String(l.created_at);
+          });
+
+          modulesData[key] = {
+            module_name: name,
+            count,
+            last_visited: timestamps.length > 0 ? timestamps[0] : null,
+            timestamps: timestamps.slice(0, 20) // Lưu 20 mốc thời gian gần nhất
+          };
+        });
+
+        const detailJson = {
+          user_id: u.id,
+          full_name: u.full_name,
+          gmail: u.gmail,
+          room: u.room || 'Chưa cập nhật',
+          position: u.position || 'Nhân viên',
+          role: Number(u.authen) === 1 ? 'Quản trị viên' : 'Nhân sự',
+          is_online: isOnline,
+          last_online: u.last_online ? new Date(u.last_online).toISOString().replace('T', ' ').substring(0, 19) : null,
+          online_statistics: {
+            today: Math.max(todayCount, isOnline ? 1 : 0),
+            this_week: Math.max(weekCount, isOnline ? 1 : 0),
+            this_month: Math.max(monthCount, isOnline ? 1 : 0),
+            this_year: Math.max(yearCount, isOnline ? 1 : 0)
+          },
+          total_module_visits: totalModuleVisits,
+          modules: modulesData
+        };
+
+        return {
+          ...u,
+          is_online: isOnline,
+          online_stats: detailJson.online_statistics,
+          modules: modulesData,
+          total_module_visits: totalModuleVisits,
+          raw_json: detailJson
+        };
+      });
+
+      res.json({
+        success: true,
+        data: stats,
+        summary: {
+          total_users: users.length,
+          online_now: stats.filter((s) => s.is_online).length
+        }
+      });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message || 'Lỗi truy vấn thống kê hoạt động nhân sự' });
     }
   });
 

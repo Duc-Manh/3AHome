@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS `login` (
   `password` VARCHAR(255) NOT NULL,
   `phone` VARCHAR(50) DEFAULT NULL,
   `authen` INT NOT NULL DEFAULT 2,
-  `state` VARCHAR(50) DEFAULT 'active'
+  `state` VARCHAR(50) DEFAULT 'active',
+  `last_online` DATETIME DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 3. Bảng devices: Quản lý thiết bị Smart Home (Đèn, điều hòa, quạt, rèm cửa...)
@@ -129,6 +130,16 @@ CREATE TABLE IF NOT EXISTS `device` (
   `name` VARCHAR(255) NOT NULL,
   `image` VARCHAR(500) DEFAULT NULL,
   `status` INT NOT NULL DEFAULT 1
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 10. Bảng user_activity_logs: Giám sát lịch sử đăng nhập & thời điểm truy cập danh mục
+CREATE TABLE IF NOT EXISTS `user_activity_logs` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `login_id` INT NOT NULL,
+  `action_type` VARCHAR(50) NOT NULL,
+  `module` VARCHAR(50) NOT NULL,
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_login_act` (`login_id`, `action_type`, `module`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 
