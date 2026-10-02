@@ -409,20 +409,28 @@ export function createApiRouter(broadcastWs) {
 
   // 12.1. Ghi nhận hoạt động đăng nhập, ping online và truy cập danh mục
   router.post('/track-activity', async (req, res) => {
-    const { loginId, actionType = 'PING', module = 'overview' } = req.body || {};
-    if (!loginId) {
-      return res.status(400).json({ success: false, message: 'Thiếu loginId' });
+    const { loginId, gmail, actionType = 'PING', module = 'overview' } = req.body || {};
+    if (!loginId && !gmail) {
+      return res.status(400).json({ success: false, message: 'Thiếu loginId hoặc gmail' });
     }
 
     try {
-      // Cập nhật thời điểm online gần nhất trong bảng login
-      await pool.query('UPDATE login SET last_online = NOW() WHERE id = ?', [loginId]);
+      let targetId = loginId;
+      if (!targetId && gmail) {
+        const [rows] = await pool.query('SELECT id FROM login WHERE gmail = ? LIMIT 1', [gmail.trim()]);
+        if (rows.length > 0) targetId = rows[0].id;
+      }
 
-      // Ghi log hoạt động
-      await pool.query(
-        'INSERT INTO user_activity_logs (login_id, action_type, module, created_at) VALUES (?, ?, ?, NOW())',
-        [loginId, actionType, module]
-      );
+      if (targetId) {
+        // Cập nhật thời điểm online gần nhất trong bảng login
+        await pool.query('UPDATE login SET last_online = NOW() WHERE id = ?', [targetId]);
+
+        // Ghi log hoạt động
+        await pool.query(
+          'INSERT INTO user_activity_logs (login_id, action_type, module, created_at) VALUES (?, ?, ?, NOW())',
+          [targetId, actionType, module]
+        );
+      }
 
       res.json({ success: true });
     } catch (err) {
@@ -445,9 +453,13 @@ export function createApiRouter(broadcastWs) {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
-      // Lấy danh sách tài khoản
+      // Lấy danh sách tài khoản kèm tính toán trạng thái Online trực tiếp bằng TIMESTAMPDIFF của MySQL
       const [users] = await pool.query(`
-        SELECT id, time, full_name, room, position, gmail, phone, authen, state, last_online
+        SELECT id, time, full_name, room, position, gmail, phone, authen, state, last_online,
+               CASE
+                 WHEN last_online IS NOT NULL AND TIMESTAMPDIFF(SECOND, last_online, NOW()) <= 300 THEN 1
+                 ELSE 0
+               END AS is_online_db
         FROM login
         ORDER BY id ASC
       `);
@@ -460,7 +472,6 @@ export function createApiRouter(broadcastWs) {
       `);
 
       const now = new Date();
-      const ONLINE_THRESHOLD_MS = 2 * 60 * 1000; // 2 phút (120 giây)
 
       const MODULE_KEYS = [
         { key: 'overview', name: 'Tổng quan' },
@@ -475,14 +486,8 @@ export function createApiRouter(broadcastWs) {
       const stats = users.map((u) => {
         const userLogs = logs.filter((l) => Number(l.login_id) === Number(u.id));
 
-        // Kiểm tra trạng thái Online
-        let isOnline = false;
-        if (u.last_online) {
-          const lastOnlineDate = new Date(u.last_online);
-          if (!isNaN(lastOnlineDate.getTime())) {
-            isOnline = (now.getTime() - lastOnlineDate.getTime()) <= ONLINE_THRESHOLD_MS;
-          }
-        }
+        // Kiểm tra trạng thái Online chính xác theo MySQL
+        const isOnline = Boolean(Number(u.is_online_db) === 1);
 
         // Lọc các log phiên đăng nhập / hoạt động (LOGIN)
         const loginLogs = userLogs.filter((l) => l.action_type === 'LOGIN');
