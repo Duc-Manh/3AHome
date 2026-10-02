@@ -437,7 +437,9 @@ export function createApiRouter(broadcastWs) {
           (SELECT COUNT(DISTINCT session_id) FROM site_visits WHERE DATE(created_at) = CURDATE()) AS today,
           (SELECT COUNT(DISTINCT session_id) FROM site_visits WHERE YEAR(created_at) = YEAR(CURDATE()) AND MONTH(created_at) = MONTH(CURDATE())) AS month,
           (SELECT COUNT(DISTINCT session_id) FROM site_visits WHERE YEAR(created_at) = YEAR(CURDATE())) AS year,
-          (SELECT COUNT(DISTINCT session_id) FROM site_visits) AS total
+          (SELECT COUNT(DISTINCT session_id) FROM site_visits) AS total,
+          (SELECT COALESCE(SUM(count), 0) FROM simu) AS simu_visits,
+          (SELECT COUNT(*) FROM simu) AS simu_users
       `);
 
       const row = statsRows[0] || {};
@@ -449,6 +451,8 @@ export function createApiRouter(broadcastWs) {
           month: Number(row.month || 1),
           year: Number(row.year || 1),
           total: Number(row.total || 1),
+          simu: Number(row.simu_visits || row.simu_users || 0),
+          simuUsers: Number(row.simu_users || 0)
         }
       });
     } catch (err) {
@@ -464,7 +468,9 @@ export function createApiRouter(broadcastWs) {
           (SELECT COUNT(DISTINCT session_id) FROM site_visits WHERE DATE(created_at) = CURDATE()) AS today,
           (SELECT COUNT(DISTINCT session_id) FROM site_visits WHERE YEAR(created_at) = YEAR(CURDATE()) AND MONTH(created_at) = MONTH(CURDATE())) AS month,
           (SELECT COUNT(DISTINCT session_id) FROM site_visits WHERE YEAR(created_at) = YEAR(CURDATE())) AS year,
-          (SELECT COUNT(DISTINCT session_id) FROM site_visits) AS total
+          (SELECT COUNT(DISTINCT session_id) FROM site_visits) AS total,
+          (SELECT COALESCE(SUM(count), 0) FROM simu) AS simu_visits,
+          (SELECT COUNT(*) FROM simu) AS simu_users
       `);
       const row = statsRows[0] || {};
       res.json({
@@ -475,6 +481,8 @@ export function createApiRouter(broadcastWs) {
           month: Number(row.month || 1),
           year: Number(row.year || 1),
           total: Number(row.total || 1),
+          simu: Number(row.simu_visits || row.simu_users || 0),
+          simuUsers: Number(row.simu_users || 0)
         }
       });
     } catch (err) {
