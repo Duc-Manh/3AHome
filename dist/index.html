@@ -92,6 +92,21 @@
   <link
     href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=Montserrat:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap"
     rel="stylesheet">
+
+  <!-- Hiệu ứng cuộn tiêu đề tab trình duyệt từ phải qua trái mượt mà -->
+  <script>
+    (function () {
+      var baseTitle = "3AHOME VIỆT NAM | Giải Pháp Smart Home, BMS & Tự Động Hoá";
+      var spacer = "  ———  ";
+      var marqueeText = baseTitle + spacer;
+      var charIndex = 0;
+
+      setInterval(function () {
+        document.title = marqueeText.substring(charIndex) + marqueeText.substring(0, charIndex);
+        charIndex = (charIndex + 1) % marqueeText.length;
+      }, 240);
+    })();
+  </script>
   <script type="module" crossorigin src="/assets/index-vhJJ-7mt.js"></script>
   <link rel="stylesheet" crossorigin href="/assets/index-B700CofG.css">
 </head>
