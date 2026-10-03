@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /#dash*
+Disallow: /#employ*
+
+Sitemap: https://3ahome.vn/sitemap.xml
