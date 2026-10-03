@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { pool } from '../config/db.js';
+import { sendConsultNotificationMail } from '../services/mailService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -709,7 +710,17 @@ export function createApiRouter(broadcastWs) {
         [full_name.trim(), email.trim(), phone.trim(), (type || 'Tư vấn giải pháp').trim(), content ? content.trim() : null]
       );
 
-      console.log(`[CONSULT] Nhận yêu cầu tư vấn mới từ ${full_name} (${phone}) - Loại: ${type || 'Tư vấn giải pháp'}. Gửi thông báo đến:`, notify_emails || ['3ahomeadmin@gmail.com', 'son.lm@3ahome.vn']);
+      console.log(`[CONSULT] Nhận yêu cầu tư vấn mới từ ${full_name} (${phone}) - Loại: ${type || 'Tư vấn giải pháp'}.`);
+
+      // Tự động gửi email thông báo trực tiếp qua Gmail SMTP tới 3ahomeadmin@gmail.com và CC son.lm@3ahome.vn
+      sendConsultNotificationMail({
+        full_name: full_name.trim(),
+        email: email.trim(),
+        phone: phone.trim(),
+        type: (type || 'Tư vấn giải pháp').trim(),
+        content: content ? content.trim() : '',
+        source: (req.headers['user-agent'] && req.headers['user-agent'].includes('Dart')) ? 'Ứng dụng Smart IOT (Mobile)' : 'Website 3AHOME (https://3ahome.vn)'
+      }).catch(err => console.error('[CONSULT] Lỗi gửi email nền:', err));
 
       res.json({
         success: true,
