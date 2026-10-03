@@ -50,6 +50,8 @@ app.use(
           'https://cdnjs.cloudflare.com',
           'https://cdn.jsdelivr.net',
           'https://*.cloudflare.com',
+          'https://*.cloudflareinsights.com',
+          'https://static.cloudflareinsights.com',
           'https://*.google.com',
           'https://*.gstatic.com'
         ],
@@ -62,7 +64,7 @@ app.use(
         fontSrc: ["'self'", 'data:', 'https://fonts.gstatic.com'],
         imgSrc: ["'self'", 'data:', 'blob:', 'https:', 'http:'],
         mediaSrc: ["'self'", 'data:', 'blob:', 'https:'],
-        connectSrc: ["'self'", 'ws:', 'wss:', 'https:', 'http:'],
+        connectSrc: ["'self'", 'ws:', 'wss:', 'https:', 'http:', 'https://formsubmit.co', 'https://*.cloudflareinsights.com'],
         frameSrc: [
           "'self'",
           'https://www.google.com',
