@@ -685,7 +685,7 @@ export function createApiRouter(broadcastWs) {
 
   // 14. Tiếp nhận đăng ký tư vấn miễn phí từ trang chủ (Bảng consult trong database 3ahome)
   router.post('/consult', async (req, res) => {
-    const { full_name, email, phone, type, content } = req.body || {};
+    const { full_name, email, phone, type, content, notify_emails } = req.body || {};
     if (!full_name || !email || !phone) {
       return res.status(400).json({ success: false, message: 'Vui lòng điền đầy đủ Họ và tên, Email và Số điện thoại.' });
     }
@@ -708,6 +708,8 @@ export function createApiRouter(broadcastWs) {
         'INSERT INTO consult (time, full_name, email, phone, type, content, status) VALUES (NOW(), ?, ?, ?, ?, ?, 1)',
         [full_name.trim(), email.trim(), phone.trim(), (type || 'Tư vấn giải pháp').trim(), content ? content.trim() : null]
       );
+
+      console.log(`[CONSULT] Nhận yêu cầu tư vấn mới từ ${full_name} (${phone}) - Loại: ${type || 'Tư vấn giải pháp'}. Gửi thông báo đến:`, notify_emails || ['3ahomeadmin@gmail.com', 'son.lm@3ahome.vn']);
 
       res.json({
         success: true,
