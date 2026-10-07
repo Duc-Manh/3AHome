@@ -919,6 +919,18 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
+  // Cập nhật trạng thái bài viết (status = 1: trình duyệt, 2: đăng bài, 3: đang ẩn)
+  router.patch('/news/:id/status', async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body || {};
+    try {
+      await pool.query('UPDATE news SET status = ? WHERE id = ?', [Number(status) || 1, id]);
+      res.json({ success: true, message: 'Đã cập nhật trạng thái bài viết' });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message || 'Lỗi cập nhật trạng thái bài viết' });
+    }
+  });
+
   // Ẩn bài đăng (cột status = 3)
   router.patch('/news/:id/hide', async (req, res) => {
     const { id } = req.params;
