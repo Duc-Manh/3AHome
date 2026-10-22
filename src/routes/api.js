@@ -1644,12 +1644,23 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 4. Xóa dự án khỏi Database
+  // 4. Xóa dự án khỏi Database (xóa các hàng liên quan trong devices, gateways và locations)
   router.delete('/customer-projects/:id', async (req, res) => {
     const { id } = req.params;
     try {
+      // 1. Tìm các gateway liên quan đến dự án này
+      const [gws] = await pool.query('SELECT gateway_id FROM gateways WHERE location_id = ?', [id]);
+      if (gws.length > 0) {
+        const gwIds = gws.map(g => g.gateway_id);
+        // 2. Xóa toàn bộ các thiết bị (devices) thuộc các gateway này
+        await pool.query('DELETE FROM devices WHERE gateway_id IN (?)', [gwIds]);
+        // 3. Xóa các gateways thuộc dự án này
+        await pool.query('DELETE FROM gateways WHERE location_id = ?', [id]);
+      }
+      // 4. Xóa dự án khỏi bảng locations
       await pool.query('DELETE FROM locations WHERE location_id = ?', [id]);
-      res.json({ success: true, message: 'Đã xóa dự án khỏi database thành công' });
+
+      res.json({ success: true, message: 'Đã xóa toàn bộ dự án, Gateway và Devices liên quan khỏi database thành công' });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }
