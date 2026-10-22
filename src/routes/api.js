@@ -1375,6 +1375,318 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
+  // =========================================================================
+  // API QUẢN LÝ DỰ ÁN & THIẾT BỊ IOT (locations, gateways, devices)
+  // =========================================================================
+
+  // Khởi tạo bảng nếu chưa có
+  async function ensureIotTables() {
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS locations (
+          location_id INT AUTO_INCREMENT PRIMARY KEY,
+          location_name VARCHAR(255) NOT NULL DEFAULT 'Dự án mới chưa đặt tên',
+          address VARCHAR(255) DEFAULT 'Chưa cập nhật địa chỉ',
+          customer_name VARCHAR(255) DEFAULT NULL,
+          customer_phone VARCHAR(50) DEFAULT NULL,
+          customer_email VARCHAR(255) DEFAULT NULL,
+          status VARCHAR(50) DEFAULT 'installing',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS gateways (
+          gateway_id INT AUTO_INCREMENT PRIMARY KEY,
+          location_id INT DEFAULT NULL,
+          gateway_sn VARCHAR(100) NOT NULL UNIQUE,
+          ip_address VARCHAR(50) DEFAULT '192.168.1.250',
+          status VARCHAR(50) DEFAULT 'offline',
+          last_seen DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT fk_gateways_location FOREIGN KEY (location_id) REFERENCES locations (location_id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS devices (
+          device_id INT AUTO_INCREMENT PRIMARY KEY,
+          gateway_id INT NOT NULL,
+          device_code VARCHAR(100) NOT NULL UNIQUE,
+          device_name VARCHAR(255) NOT NULL,
+          device_type VARCHAR(50) DEFAULT 'sensor',
+          slave_address INT DEFAULT 1,
+          floor VARCHAR(100) DEFAULT 'Khu vực chính',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT fk_devices_gateway FOREIGN KEY (gateway_id) REFERENCES gateways (gateway_id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS telemetry_data (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY,
+          device_id INT NOT NULL,
+          param_name VARCHAR(50) NOT NULL,
+          param_value FLOAT NOT NULL,
+          recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          INDEX idx_device_time (device_id, recorded_at DESC),
+          CONSTRAINT fk_telemetry_device FOREIGN KEY (device_id) REFERENCES devices (device_id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
+      // Nếu bảng locations rỗng, nạp dữ liệu mẫu ban đầu để hệ thống có dữ liệu hiển thị ngay
+      const [check] = await pool.query('SELECT COUNT(*) as count FROM locations');
+      if (check[0].count === 0) {
+        // Dự án 1: Biệt Thự Homeland
+        const [l1] = await pool.query(`
+          INSERT INTO locations (location_name, address, customer_name, customer_phone, customer_email, status, created_at)
+          VALUES ('Biệt Thự Homeland - Nhà 4 Tầng', 'Khu Đô Thị Ecopark, Văn Giang, Hưng Yên', 'Nguyễn Văn An', '0912 345 678', 'nguyenvanan.ecopark@gmail.com', 'active', '2026-10-15 09:30:00')
+        `);
+        const [g1] = await pool.query(`
+          INSERT INTO gateways (location_id, gateway_sn, ip_address, status, last_seen, created_at)
+          VALUES (?, 'RCU100_SN_003', '192.168.1.250', 'online', NOW(), '2026-10-15 09:30:00')
+        `, [l1.insertId]);
+        const g1Id = g1.insertId;
+        await pool.query(`
+          INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor) VALUES
+          (?, 'TEMP_T1_01', 'Cảm biến nhiệt độ CB Tầng 1', 'sensor', 1, 'Tầng 1'),
+          (?, 'EM_T1_01', 'Công tơ điện thông minh Tầng 1', 'sensor', 2, 'Tầng 1'),
+          (?, 'TEMP_T2_01', 'Cảm biến nhiệt độ CB Tầng 2', 'sensor', 3, 'Tầng 2'),
+          (?, 'EM_T2_01', 'Công tơ điện thông minh Tầng 2', 'sensor', 4, 'Tầng 2'),
+          (?, 'TEMP_T3_01', 'Cảm biến nhiệt độ CB Tầng 3', 'sensor', 5, 'Tầng 3'),
+          (?, 'EM_T3_01', 'Công tơ điện thông minh Tầng 3', 'sensor', 6, 'Tầng 3'),
+          (?, 'TEMP_T4_01', 'Cảm biến nhiệt độ CB Tầng 4', 'sensor', 7, 'Tầng 4'),
+          (?, 'EM_T4_01', 'Công tơ điện thông minh Tầng 4', 'sensor', 8, 'Tầng 4')
+        `, [g1Id, g1Id, g1Id, g1Id, g1Id, g1Id, g1Id, g1Id]);
+
+        // Dự án 2: Căn Hộ Duplex Sunshine City
+        const [l2] = await pool.query(`
+          INSERT INTO locations (location_name, address, customer_name, customer_phone, customer_email, status, created_at)
+          VALUES ('Căn Hộ Duplex Sunshine City - P.802', 'KĐT Ciputra, Tây Hồ, Hà Nội', 'Trần Thị Mai', '0988 765 432', 'tranthimai.sunshine@gmail.com', 'active', '2026-10-16 14:15:00')
+        `);
+        const [g2] = await pool.query(`
+          INSERT INTO gateways (location_id, gateway_sn, ip_address, status, last_seen, created_at)
+          VALUES (?, 'RCU100_SN_007', '192.168.1.251', 'online', NOW(), '2026-10-16 14:15:00')
+        `, [l2.insertId]);
+        const g2Id = g2.insertId;
+        await pool.query(`
+          INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor) VALUES
+          (?, 'LIGHT_PK_01', 'Hệ thống đèn Phòng Khách', 'light', 1, 'Phòng Khách'),
+          (?, 'AC_PK_01', 'Điều hòa Phòng Khách', 'ac', 2, 'Phòng Khách'),
+          (?, 'FAN_BEP_01', 'Quạt hút mùi Bếp', 'motor', 3, 'Bếp'),
+          (?, 'AC_PN1_01', 'Điều hòa Phòng Ngủ Master', 'ac', 4, 'Phòng Ngủ 1'),
+          (?, 'LIGHT_PN2_01', 'Đèn chiếu sáng Phòng Ngủ 2', 'light', 5, 'Phòng Ngủ 2')
+        `, [g2Id, g2Id, g2Id, g2Id, g2Id]);
+
+        // Dự án 3: TechHub Tower
+        const [l3] = await pool.query(`
+          INSERT INTO locations (location_name, address, customer_name, customer_phone, customer_email, status, created_at)
+          VALUES ('Tòa Nhà Văn Phòng TechHub Tower', 'KCN Đại Đồng - Hoàn Sơn, Bắc Ninh', 'BQL TechHub', '0866 57 2388', 'bql.techhub@gmail.com', 'installing', '2026-10-17 11:00:00')
+        `);
+        const [g3] = await pool.query(`
+          INSERT INTO gateways (location_id, gateway_sn, ip_address, status, last_seen, created_at)
+          VALUES (?, 'RCU100_SN_012', '192.168.1.252', 'offline', '2026-10-17 11:00:00', '2026-10-17 11:00:00')
+        `, [l3.insertId]);
+        const g3Id = g3.insertId;
+        await pool.query(`
+          INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor) VALUES
+          (?, 'FAN_HVAC_B1', 'Quạt thông gió Tầng Hầm', 'motor', 1, 'Tầng Hầm'),
+          (?, 'EM_SANH_01', 'Công tơ tổng Sảnh Tầng 1', 'sensor', 2, 'Sảnh Tầng 1')
+        `, [g3Id, g3Id]);
+      }
+    } catch (err) {
+      console.error('Lỗi khởi tạo bảng IoT:', err.message);
+    }
+  }
+
+  // Gọi ensureIotTables khi khởi tạo router
+  ensureIotTables();
+
+  // 1. Lấy danh sách toàn bộ dự án kèm thông tin Gateway và Devices từ Database
+  router.get('/customer-projects', async (req, res) => {
+    try {
+      await ensureIotTables();
+      const [locations] = await pool.query(`
+        SELECT 
+          l.location_id AS id,
+          l.location_name AS projectName,
+          l.address,
+          l.customer_name AS customerName,
+          COALESCE(l.customer_phone, 'Chưa có SĐT') AS phone,
+          COALESCE(l.customer_email, 'Chưa có Email') AS email,
+          l.status,
+          DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i') AS createdAt,
+          g.gateway_id AS gatewayId,
+          COALESCE(g.gateway_sn, 'CHƯA_GÁN') AS gatewaySn,
+          COALESCE(g.ip_address, '192.168.1.250') AS gatewayIp,
+          COALESCE(g.status, 'offline') AS gatewayStatus,
+          g.last_seen AS lastSeen
+        FROM locations l
+        LEFT JOIN gateways g ON l.location_id = g.location_id
+        ORDER BY l.location_id DESC
+      `);
+
+      const [allDevices] = await pool.query(`
+        SELECT 
+          device_id AS id,
+          gateway_id AS gatewayId,
+          device_code,
+          device_name,
+          device_type,
+          slave_address,
+          COALESCE(floor, 'Khu vực chính') AS location_name,
+          DATE_FORMAT(created_at, '%Y-%m-%d') AS created_at
+        FROM devices
+        ORDER BY slave_address ASC, device_id ASC
+      `);
+
+      // Gộp devices vào từng location
+      const result = locations.map(loc => {
+        const devList = allDevices.filter(d => d.gatewayId === loc.gatewayId);
+        return {
+          id: loc.id,
+          projectName: loc.projectName,
+          address: loc.address,
+          phone: loc.phone,
+          email: loc.email,
+          status: loc.status || 'installing',
+          createdAt: loc.createdAt,
+          gateway: {
+            gateway_sn: loc.gatewaySn,
+            ip_address: loc.gatewayIp,
+            status: loc.gatewayStatus
+          },
+          devices: devList.map(d => ({
+            id: d.id,
+            device_code: d.device_code,
+            device_name: d.device_name,
+            device_type: d.device_type,
+            slave_address: d.slave_address,
+            location_name: d.location_name,
+            created_at: d.created_at
+          }))
+        };
+      });
+
+      res.json({ success: true, data: result });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 2. Tạo mới dự án vào Database (locations -> gateways -> devices)
+  router.post('/customer-projects', async (req, res) => {
+    const { projectName, address, phone, email, gateway, status, devices } = req.body;
+    try {
+      await ensureIotTables();
+      const [locResult] = await pool.query(`
+        INSERT INTO locations (location_name, address, customer_phone, customer_email, status)
+        VALUES (?, ?, ?, ?, ?)
+      `, [projectName, address, phone, email || null, status || 'installing']);
+      const locationId = locResult.insertId;
+
+      let gatewayId = null;
+      if (gateway && gateway.gateway_sn) {
+        // Kiểm tra gateway_sn đã tồn tại chưa
+        const [existingGws] = await pool.query('SELECT gateway_id FROM gateways WHERE gateway_sn = ?', [gateway.gateway_sn.toUpperCase()]);
+        if (existingGws.length > 0) {
+          gatewayId = existingGws[0].gateway_id;
+          await pool.query('UPDATE gateways SET location_id = ?, ip_address = ?, status = ? WHERE gateway_id = ?', 
+            [locationId, gateway.ip_address || '192.168.1.250', gateway.status || 'online', gatewayId]);
+        } else {
+          const [gwResult] = await pool.query(`
+            INSERT INTO gateways (location_id, gateway_sn, ip_address, status)
+            VALUES (?, ?, ?, ?)
+          `, [locationId, gateway.gateway_sn.toUpperCase(), gateway.ip_address || '192.168.1.250', gateway.status || 'online']);
+          gatewayId = gwResult.insertId;
+        }
+      }
+
+      // Thêm danh mục devices nếu có
+      if (gatewayId && Array.isArray(devices) && devices.length > 0) {
+        for (const dev of devices) {
+          await pool.query(`
+            INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE device_name = VALUES(device_name), slave_address = VALUES(slave_address), floor = VALUES(floor)
+          `, [gatewayId, dev.device_code.toUpperCase(), dev.device_name, dev.device_type || 'sensor', Number(dev.slave_address) || 1, dev.location_name || dev.floor || 'Khu vực chính']);
+        }
+      }
+
+      res.json({ success: true, message: 'Đã tạo dự án thành công vào database', locationId });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 3. Cập nhật thông tin dự án & Gateway
+  router.put('/customer-projects/:id', async (req, res) => {
+    const { id } = req.params;
+    const { projectName, address, phone, email, gateway, status } = req.body;
+    try {
+      await pool.query(`
+        UPDATE locations 
+        SET location_name = ?, address = ?, customer_phone = ?, customer_email = ?, status = ?
+        WHERE location_id = ?
+      `, [projectName, address, phone, email, status, id]);
+
+      if (gateway && gateway.gateway_sn) {
+        await pool.query(`
+          UPDATE gateways 
+          SET gateway_sn = ?, ip_address = ?, status = ?
+          WHERE location_id = ?
+        `, [gateway.gateway_sn.toUpperCase(), gateway.ip_address, gateway.status, id]);
+      }
+
+      res.json({ success: true, message: 'Đã cập nhật dự án thành công' });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 4. Xóa dự án khỏi Database
+  router.delete('/customer-projects/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+      await pool.query('DELETE FROM locations WHERE location_id = ?', [id]);
+      res.json({ success: true, message: 'Đã xóa dự án khỏi database thành công' });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 5. Thêm thiết bị mới vào Gateway của Dự án
+  router.post('/customer-projects/:id/devices', async (req, res) => {
+    const { id } = req.params;
+    const { device_code, device_name, device_type, slave_address, floor, location_name } = req.body;
+    try {
+      const [gws] = await pool.query('SELECT gateway_id FROM gateways WHERE location_id = ?', [id]);
+      if (gws.length === 0) {
+        return res.status(404).json({ success: false, message: 'Không tìm thấy Gateway của dự án này' });
+      }
+      const gatewayId = gws[0].gateway_id;
+      const [result] = await pool.query(`
+        INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `, [gatewayId, device_code.toUpperCase(), device_name, device_type || 'sensor', Number(slave_address) || 1, floor || location_name || 'Khu vực chính']);
+
+      res.json({ success: true, message: 'Đã thêm thiết bị vào database', deviceId: result.insertId });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 6. Xóa thiết bị khỏi database
+  router.delete('/customer-devices/:deviceId', async (req, res) => {
+    const { deviceId } = req.params;
+    try {
+      await pool.query('DELETE FROM devices WHERE device_id = ?', [deviceId]);
+      res.json({ success: true, message: 'Đã xóa thiết bị thành công' });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
   return router;
 }
 
