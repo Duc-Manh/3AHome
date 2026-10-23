@@ -142,4 +142,56 @@ CREATE TABLE IF NOT EXISTS `user_activity_logs` (
   INDEX `idx_login_act` (`login_id`, `action_type`, `module`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 11. Bảng locations: Quản lý dự án khách hàng & địa điểm lắp đặt
+CREATE TABLE IF NOT EXISTS `locations` (
+  `location_id` INT AUTO_INCREMENT PRIMARY KEY,
+  `location_name` VARCHAR(255) NOT NULL DEFAULT 'Dự án mới chưa đặt tên',
+  `address` VARCHAR(255) DEFAULT 'Chưa cập nhật địa chỉ',
+  `customer_name` VARCHAR(255) DEFAULT NULL,
+  `customer_phone` VARCHAR(50) DEFAULT NULL,
+  `customer_email` VARCHAR(255) DEFAULT NULL,
+  `customer_pass` VARCHAR(255) DEFAULT '3AH@me',
+  `status` VARCHAR(50) DEFAULT 'installing',
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 12. Bảng gateways: Quản lý IoT Gateway (3ONEDATA / RCU)
+CREATE TABLE IF NOT EXISTS `gateways` (
+  `gateway_id` INT AUTO_INCREMENT PRIMARY KEY,
+  `location_id` INT DEFAULT NULL,
+  `gateway_sn` VARCHAR(100) NOT NULL UNIQUE,
+  `ip_address` VARCHAR(50) DEFAULT '192.168.1.250',
+  `status` VARCHAR(50) DEFAULT 'offline',
+  `last_seen` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT `fk_gateways_location` FOREIGN KEY (`location_id`) REFERENCES `locations` (`location_id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 13. Bảng devices: Danh mục thiết bị thuộc Gateway
+CREATE TABLE IF NOT EXISTS `devices` (
+  `device_id` INT AUTO_INCREMENT PRIMARY KEY,
+  `gateway_id` INT NOT NULL,
+  `device_code` VARCHAR(100) NOT NULL UNIQUE,
+  `device_name` VARCHAR(255) NOT NULL,
+  `device_type` VARCHAR(50) DEFAULT 'sensor',
+  `slave_address` INT DEFAULT 1,
+  `floor` VARCHAR(100) DEFAULT 'Khu vực chính',
+  `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT `fk_devices_gateway` FOREIGN KEY (`gateway_id`) REFERENCES `gateways` (`gateway_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 14. Bảng telemetry_data: Lưu viễn trắc thông số đo đạc thời gian thực (1 hàng cho mỗi thiết bị)
+CREATE TABLE IF NOT EXISTS `telemetry_data` (
+  `device_id` INT PRIMARY KEY,
+  `temperature` FLOAT DEFAULT NULL,
+  `humidity` FLOAT DEFAULT NULL,
+  `power` FLOAT DEFAULT NULL,
+  `voltage` FLOAT DEFAULT NULL,
+  `current` FLOAT DEFAULT NULL,
+  `raw_data` TEXT DEFAULT NULL,
+  `recorded_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT `fk_telemetry_device` FOREIGN KEY (`device_id`) REFERENCES `devices` (`device_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
 

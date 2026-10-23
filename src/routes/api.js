@@ -1390,10 +1390,17 @@ export function createApiRouter(broadcastWs) {
           customer_name VARCHAR(255) DEFAULT NULL,
           customer_phone VARCHAR(50) DEFAULT NULL,
           customer_email VARCHAR(255) DEFAULT NULL,
+          customer_pass VARCHAR(255) DEFAULT '3AH@me',
           status VARCHAR(50) DEFAULT 'installing',
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
+
+      try {
+        await pool.query("ALTER TABLE locations ADD COLUMN customer_pass VARCHAR(255) DEFAULT '3AH@me' AFTER customer_email");
+      } catch (e) {
+        // Cột customer_pass đã tồn tại
+      }
 
       await pool.query(`
         CREATE TABLE IF NOT EXISTS gateways (
@@ -1514,6 +1521,7 @@ export function createApiRouter(broadcastWs) {
           l.customer_name AS customerName,
           COALESCE(l.customer_phone, 'Chưa có SĐT') AS phone,
           COALESCE(l.customer_email, 'Chưa có Email') AS email,
+          COALESCE(l.customer_pass, '3AH@me') AS customer_pass,
           l.status,
           DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i') AS createdAt,
           g.gateway_id AS gatewayId,
@@ -1549,6 +1557,7 @@ export function createApiRouter(broadcastWs) {
           address: loc.address,
           phone: loc.phone,
           email: loc.email,
+          customer_pass: loc.customer_pass || '3AH@me',
           status: loc.status || 'installing',
           createdAt: loc.createdAt,
           gateway: {
@@ -1576,13 +1585,13 @@ export function createApiRouter(broadcastWs) {
 
   // 2. Tạo mới dự án vào Database (locations -> gateways -> devices)
   router.post('/customer-projects', async (req, res) => {
-    const { projectName, address, phone, email, gateway, status, devices } = req.body;
+    const { projectName, address, phone, email, customer_pass, gateway, status, devices } = req.body;
     try {
       await ensureIotTables();
       const [locResult] = await pool.query(`
-        INSERT INTO locations (location_name, address, customer_phone, customer_email, status)
-        VALUES (?, ?, ?, ?, ?)
-      `, [projectName, address, phone, email || null, status || 'installing']);
+        INSERT INTO locations (location_name, address, customer_phone, customer_email, customer_pass, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `, [projectName, address, phone, email || null, customer_pass || '3AH@me', status || 'installing']);
       const locationId = locResult.insertId;
 
       let gatewayId = null;
@@ -1622,13 +1631,13 @@ export function createApiRouter(broadcastWs) {
   // 3. Cập nhật thông tin dự án & Gateway
   router.put('/customer-projects/:id', async (req, res) => {
     const { id } = req.params;
-    const { projectName, address, phone, email, gateway, status } = req.body;
+    const { projectName, address, phone, email, customer_pass, gateway, status } = req.body;
     try {
       await pool.query(`
         UPDATE locations 
-        SET location_name = ?, address = ?, customer_phone = ?, customer_email = ?, status = ?
+        SET location_name = ?, address = ?, customer_phone = ?, customer_email = ?, customer_pass = COALESCE(?, customer_pass), status = ?
         WHERE location_id = ?
-      `, [projectName, address, phone, email, status, id]);
+      `, [projectName, address, phone, email, customer_pass || null, status, id]);
 
       if (gateway && gateway.gateway_sn) {
         await pool.query(`
@@ -1710,7 +1719,11 @@ export function createApiRouter(broadcastWs) {
         if (devs.length > 0) {
           targetDeviceId = devs[0].device_id;
         } else {
-          return res.status(404).json({ success: false, message: `Không tìm thấy thiết bị có device_code: ${device_code}` });
+          const [insDev] = await pool.query(
+            'INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor) VALUES (1, ?, ?, ?, 1, ?)',
+            [String(device_code).toUpperCase(), `Thiết bị ${device_code}`, 'sensor', 'Khu vực chính']
+          );
+          targetDeviceId = insDev.insertId;
         }
       }
 

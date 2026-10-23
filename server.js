@@ -258,9 +258,22 @@ aedesBroker.on('publish', async (packet, client) => {
       }
 
       if (devCode) {
-        const [devRows] = await dbPool.query('SELECT device_id FROM devices WHERE device_code = ?', [String(devCode).toUpperCase()]);
+        const formattedDevCode = String(devCode).toUpperCase();
+        const [devRows] = await dbPool.query('SELECT device_id FROM devices WHERE device_code = ?', [formattedDevCode]);
+        let devId;
         if (devRows.length > 0) {
-          const devId = devRows[0].device_id;
+          devId = devRows[0].device_id;
+        } else {
+          // Tự động thêm thiết bị mới vào bảng devices nếu chưa có
+          const [insDev] = await dbPool.query(
+            'INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor) VALUES (1, ?, ?, ?, 1, ?)',
+            [formattedDevCode, data.device_name || `Thiết bị ${formattedDevCode}`, data.device_type || 'sensor', data.floor || 'Khu vực chính']
+          );
+          devId = insDev.insertId;
+          console.log(`✨ [MQTT Auto-Register] Đã tự động tạo mới thiết bị [${formattedDevCode}] vào bảng devices (device_id: ${devId})!`);
+        }
+
+        if (devId) {
           const measurements = data.measurements || data;
 
           const temp = measurements.temperature !== undefined ? Number(measurements.temperature) : (measurements.temp !== undefined ? Number(measurements.temp) : null);
