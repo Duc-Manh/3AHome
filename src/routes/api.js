@@ -257,6 +257,32 @@ export function createApiRouter(broadcastWs) {
       );
 
       if (rows.length === 0) {
+        // Kiểm tra tài khoản khách hàng trong bảng locations (customer_email & customer_pass)
+        const [locRows] = await pool.query(
+          'SELECT location_id, location_name, address, customer_name, customer_phone, customer_email, customer_pass, status FROM locations WHERE customer_email = ? LIMIT 1',
+          [gmail.trim()]
+        );
+        if (locRows.length > 0) {
+          const loc = locRows[0];
+          const validPass = loc.customer_pass || '3AH@me';
+          if (validPass === password) {
+            return res.json({
+              success: true,
+              role: 'customer',
+              message: 'Đăng nhập khách hàng thành công',
+              user: {
+                id: loc.location_id,
+                full_name: loc.customer_name || loc.location_name,
+                gmail: loc.customer_email,
+                phone: loc.customer_phone,
+                role: 'customer',
+                projectName: loc.location_name,
+                address: loc.address,
+                status: loc.status
+              }
+            });
+          }
+        }
         return res.status(401).json({ success: false, message: 'Gmail hoặc Mật khẩu không chính xác.' });
       }
 
@@ -308,6 +334,72 @@ export function createApiRouter(broadcastWs) {
       });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message || 'Lỗi máy chủ cơ sở dữ liệu' });
+    }
+  });
+
+  // 7.1. API Đăng nhập Khách hàng qua customer_email & customer_pass trong bảng locations
+  router.post('/customer-login', async (req, res) => {
+    const { email, password, gmail } = req.body;
+    const inputEmail = (email || gmail || '').trim();
+    const inputPass = (password || '').trim();
+
+    if (!inputEmail || !inputPass) {
+      return res.status(400).json({ success: false, message: 'Vui lòng nhập đầy đủ Email và Mật khẩu.' });
+    }
+
+    try {
+      await ensureIotTables();
+      const [rows] = await pool.query(
+        'SELECT location_id, location_name, address, customer_name, customer_phone, customer_email, customer_pass, status, created_at FROM locations WHERE customer_email = ? LIMIT 1',
+        [inputEmail]
+      );
+
+      if (rows.length === 0) {
+        return res.status(401).json({ success: false, message: 'Email khách hàng không tồn tại trong hệ thống.' });
+      }
+
+      const loc = rows[0];
+      const validPass = loc.customer_pass || '3AH@me';
+
+      if (validPass !== inputPass) {
+        return res.status(401).json({ success: false, message: 'Mật khẩu khách hàng không chính xác.' });
+      }
+
+      // Lấy thông tin gateway và devices liên kết với location này
+      const [gws] = await pool.query(
+        'SELECT gateway_id, gateway_sn, ip_address, status, last_seen FROM gateways WHERE location_id = ? LIMIT 1',
+        [loc.location_id]
+      );
+      const gateway = gws.length > 0 ? gws[0] : null;
+
+      let devices = [];
+      if (gateway) {
+        const [devs] = await pool.query(
+          'SELECT device_id, device_code, device_name, device_type, slave_address, floor FROM devices WHERE gateway_id = ? ORDER BY slave_address ASC',
+          [gateway.gateway_id]
+        );
+        devices = devs;
+      }
+
+      return res.json({
+        success: true,
+        message: 'Đăng nhập khách hàng thành công',
+        role: 'customer',
+        data: {
+          location_id: loc.location_id,
+          location_name: loc.location_name,
+          customer_name: loc.customer_name || loc.location_name,
+          customer_email: loc.customer_email,
+          customer_phone: loc.customer_phone,
+          customer_pass: loc.customer_pass || '3AH@me',
+          address: loc.address,
+          status: loc.status,
+          gateway: gateway,
+          devices: devices
+        }
+      });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message || 'Lỗi xử lý đăng nhập' });
     }
   });
 
