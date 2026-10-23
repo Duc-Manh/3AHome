@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import http from 'http';
+import net from 'net';
+import { Aedes } from 'aedes';
 import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -226,11 +228,90 @@ app.get('*', (req, res, next) => {
   });
 });
 
+// Khởi tạo MQTT Broker nội bộ (Port 1883) phục vụ Gateway 3ONEDATA & MQTTX
+const aedesBroker = await Aedes.createBroker();
+const mqttServer = net.createServer(aedesBroker.handle.bind(aedesBroker));
+const MQTT_PORT = process.env.MQTT_PORT || 1883;
+
+mqttServer.listen(MQTT_PORT, '0.0.0.0', () => {
+  console.log(`📡 MQTT Broker nội bộ đang lắng nghe trên cổng ${MQTT_PORT} (0.0.0.0)`);
+});
+
+aedesBroker.on('client', (client) => {
+  console.log(`🔌 Thiết bị/Client mới kết nối MQTT: ${client ? client.id : 'unknown'}`);
+});
+
+aedesBroker.on('publish', async (packet, client) => {
+  if (client) {
+    const topic = packet.topic;
+    const msgStr = packet.payload.toString();
+    console.log(`📩 [MQTT] Nhận tin từ [${client.id}] - Topic: ${topic} - Data: ${msgStr}`);
+
+    try {
+      const data = JSON.parse(msgStr);
+      const { pool: dbPool } = await import('./src/config/db.js');
+
+      let devCode = data.device_code || data.deviceId || data.deviceCode;
+      if (!devCode && topic.includes('/')) {
+        const parts = topic.split('/');
+        devCode = parts[parts.length - 1];
+      }
+
+      if (devCode) {
+        const [devRows] = await dbPool.query('SELECT device_id FROM devices WHERE device_code = ?', [String(devCode).toUpperCase()]);
+        if (devRows.length > 0) {
+          const devId = devRows[0].device_id;
+          const measurements = data.measurements || data;
+
+          const temp = measurements.temperature !== undefined ? Number(measurements.temperature) : (measurements.temp !== undefined ? Number(measurements.temp) : null);
+          const humi = measurements.humidity !== undefined ? Number(measurements.humidity) : (measurements.humi !== undefined ? Number(measurements.humi) : null);
+          const power = measurements.power !== undefined ? Number(measurements.power) : (measurements.watt !== undefined ? Number(measurements.watt) : null);
+          const volt = measurements.voltage !== undefined ? Number(measurements.voltage) : (measurements.volt !== undefined ? Number(measurements.volt) : null);
+          const curr = measurements.current !== undefined ? Number(measurements.current) : (measurements.curr !== undefined ? Number(measurements.curr) : null);
+
+          await dbPool.query(`
+            INSERT INTO telemetry_data (device_id, temperature, humidity, power, voltage, current, raw_data, recorded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+            ON DUPLICATE KEY UPDATE
+              temperature = COALESCE(VALUES(temperature), temperature),
+              humidity = COALESCE(VALUES(humidity), humidity),
+              power = COALESCE(VALUES(power), power),
+              voltage = COALESCE(VALUES(voltage), voltage),
+              current = COALESCE(VALUES(current), current),
+              raw_data = COALESCE(VALUES(raw_data), raw_data),
+              recorded_at = NOW()
+          `, [
+            devId,
+            (temp !== null && !isNaN(temp)) ? temp : null,
+            (humi !== null && !isNaN(humi)) ? humi : null,
+            (power !== null && !isNaN(power)) ? power : null,
+            (volt !== null && !isNaN(volt)) ? volt : null,
+            (curr !== null && !isNaN(curr)) ? curr : null,
+            JSON.stringify(measurements)
+          ]);
+
+          console.log(`✅ [MQTT -> MySQL] Đã cập nhật 1 hàng duy nhất cho thiết bị [${devCode}] (device_id: ${devId})!`);
+          broadcastWs({
+            type: 'TELEMETRY_DATA_SAVED',
+            device_id: devId,
+            device_code: devCode,
+            measurements: measurements,
+            recorded_at: new Date().toISOString()
+          });
+        }
+      }
+    } catch {
+      // Bỏ qua nếu tin nhắn không phải JSON
+    }
+  }
+});
+
 // Khởi chạy server
 server.listen(PORT, async () => {
   console.log(`=========================================`);
   console.log(`🚀 AAA_Backend đang chạy tại: http://localhost:${PORT}`);
   console.log(`📡 WebSocket Realtime Gateway: ws://localhost:${PORT}/ws`);
+  console.log(`📡 MQTT Broker Gateway: mqtt://localhost:${MQTT_PORT}`);
   console.log(`=========================================`);
   
   // Kiểm tra kết nối MySQL

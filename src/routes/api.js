@@ -1698,6 +1698,128 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
+  // 7. Nhận số liệu viễn trắc (Telemetry) từ Gateway / Cảm biến / MQTTX lưu vào bảng telemetry_data (Upsert 1 hàng/device_id)
+  router.post('/telemetry-data', async (req, res) => {
+    const { device_code, device_id, param_name, param_value, measurements } = req.body;
+    try {
+      let targetDeviceId = device_id;
+
+      // Nếu truyền mã device_code, tự tìm device_id tương ứng trong bảng devices
+      if (!targetDeviceId && device_code) {
+        const [devs] = await pool.query('SELECT device_id FROM devices WHERE device_code = ?', [String(device_code).toUpperCase()]);
+        if (devs.length > 0) {
+          targetDeviceId = devs[0].device_id;
+        } else {
+          return res.status(404).json({ success: false, message: `Không tìm thấy thiết bị có device_code: ${device_code}` });
+        }
+      }
+
+      if (!targetDeviceId) {
+        return res.status(400).json({ success: false, message: 'Vui lòng cung cấp device_code hoặc device_id' });
+      }
+
+      const m = { ...(measurements || {}) };
+      if (param_name && param_value !== undefined) {
+        m[param_name] = Number(param_value);
+      }
+
+      const temp = m.temperature !== undefined ? Number(m.temperature) : (m.temp !== undefined ? Number(m.temp) : null);
+      const humi = m.humidity !== undefined ? Number(m.humidity) : (m.humi !== undefined ? Number(m.humi) : null);
+      const power = m.power !== undefined ? Number(m.power) : (m.watt !== undefined ? Number(m.watt) : null);
+      const volt = m.voltage !== undefined ? Number(m.voltage) : (m.volt !== undefined ? Number(m.volt) : null);
+      const curr = m.current !== undefined ? Number(m.current) : (m.curr !== undefined ? Number(m.curr) : null);
+
+      await pool.query(`
+        INSERT INTO telemetry_data (device_id, temperature, humidity, power, voltage, current, raw_data, recorded_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+        ON DUPLICATE KEY UPDATE
+          temperature = COALESCE(VALUES(temperature), temperature),
+          humidity = COALESCE(VALUES(humidity), humidity),
+          power = COALESCE(VALUES(power), power),
+          voltage = COALESCE(VALUES(voltage), voltage),
+          current = COALESCE(VALUES(current), current),
+          raw_data = COALESCE(VALUES(raw_data), raw_data),
+          recorded_at = NOW()
+      `, [
+        targetDeviceId,
+        (temp !== null && !isNaN(temp)) ? temp : null,
+        (humi !== null && !isNaN(humi)) ? humi : null,
+        (power !== null && !isNaN(power)) ? power : null,
+        (volt !== null && !isNaN(volt)) ? volt : null,
+        (curr !== null && !isNaN(curr)) ? curr : null,
+        JSON.stringify(m)
+      ]);
+
+      if (broadcastWs) {
+        broadcastWs({
+          type: 'TELEMETRY_DATA_SAVED',
+          device_id: targetDeviceId,
+          device_code: device_code,
+          measurements: m,
+          recorded_at: new Date().toISOString()
+        });
+      }
+
+      res.json({ success: true, message: 'Đã cập nhật 1 hàng số liệu đo đạc vào bảng telemetry_data thành công', device_id: targetDeviceId });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 8. Lấy danh sách số liệu đo mới nhất từ bảng telemetry_data (JOIN với devices, gateways, locations)
+  router.get('/telemetry-data', async (req, res) => {
+    const { device_code, location_id, gateway_sn } = req.query;
+    try {
+      let sql = `
+        SELECT 
+          t.device_id,
+          d.device_code,
+          d.device_name,
+          d.device_type,
+          d.slave_address,
+          d.floor,
+          g.gateway_id,
+          g.gateway_sn,
+          g.ip_address AS gateway_ip,
+          COALESCE(g.status, 'offline') AS gateway_status,
+          l.location_id,
+          COALESCE(l.location_name, 'Dự án nội bộ') AS project_name,
+          l.address AS project_address,
+          t.temperature,
+          t.humidity,
+          t.power,
+          t.voltage,
+          t.current,
+          t.raw_data,
+          DATE_FORMAT(t.recorded_at, '%Y-%m-%d %H:%i:%s') AS recorded_at
+        FROM telemetry_data t
+        JOIN devices d ON t.device_id = d.device_id
+        LEFT JOIN gateways g ON d.gateway_id = g.gateway_id
+        LEFT JOIN locations l ON g.location_id = l.location_id
+        WHERE 1=1
+      `;
+      const params = [];
+      if (device_code) {
+        sql += ' AND d.device_code = ?';
+        params.push(String(device_code).toUpperCase());
+      }
+      if (location_id) {
+        sql += ' AND l.location_id = ?';
+        params.push(Number(location_id));
+      }
+      if (gateway_sn) {
+        sql += ' AND g.gateway_sn = ?';
+        params.push(String(gateway_sn));
+      }
+      sql += ' ORDER BY t.recorded_at DESC';
+
+      const [rows] = await pool.query(sql, params);
+      res.json({ success: true, count: rows.length, data: rows });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
   return router;
 }
 
