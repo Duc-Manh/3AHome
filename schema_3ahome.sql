@@ -193,5 +193,22 @@ CREATE TABLE IF NOT EXISTS `telemetry_data` (
   CONSTRAINT `fk_telemetry_device` FOREIGN KEY (`device_id`) REFERENCES `devices` (`device_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- 15. Bảng telemetry_history: Lưu lịch sử thông số đo đạc theo chu kỳ thời gian (để vẽ biểu đồ tuần/tháng/năm)
+CREATE TABLE IF NOT EXISTS `telemetry_history` (
+  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+  `device_id` INT NOT NULL,
+  `temperature` FLOAT DEFAULT NULL,
+  `humidity` FLOAT DEFAULT NULL,
+  `power` FLOAT DEFAULT NULL,
+  `voltage` FLOAT DEFAULT NULL,
+  `current` FLOAT DEFAULT NULL,
+  `raw_data` TEXT DEFAULT NULL,
+  `recorded_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_telemetry_hist_dev_time` (`device_id`, `recorded_at`),
+  INDEX `idx_telemetry_hist_time` (`recorded_at`),
+  CONSTRAINT `fk_telemetry_hist_device` FOREIGN KEY (`device_id`) REFERENCES `devices` (`device_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
 
 

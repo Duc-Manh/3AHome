@@ -303,6 +303,24 @@ aedesBroker.on('publish', async (packet, client) => {
             JSON.stringify(measurements)
           ]);
 
+          // Lưu vào bảng telemetry_history để tích luỹ dữ liệu vẽ biểu đồ lịch sử tuần/tháng
+          try {
+            await dbPool.query(`
+              INSERT INTO telemetry_history (device_id, temperature, humidity, power, voltage, current, raw_data, recorded_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+            `, [
+              devId,
+              (temp !== null && !isNaN(temp)) ? temp : null,
+              (humi !== null && !isNaN(humi)) ? humi : null,
+              (power !== null && !isNaN(power)) ? power : null,
+              (volt !== null && !isNaN(volt)) ? volt : null,
+              (curr !== null && !isNaN(curr)) ? curr : null,
+              JSON.stringify(measurements)
+            ]);
+          } catch (histErr) {
+            console.warn('⚠️ Lỗi lưu telemetry_history:', histErr.message);
+          }
+
           console.log(`✅ [MQTT -> MySQL] Đã cập nhật 1 hàng duy nhất cho thiết bị [${devCode}] (device_id: ${devId})!`);
           broadcastWs({
             type: 'TELEMETRY_DATA_SAVED',

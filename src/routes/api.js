@@ -265,7 +265,13 @@ export function createApiRouter(broadcastWs) {
         if (locRows.length > 0) {
           const loc = locRows[0];
           const validPass = loc.customer_pass || '3AH@me';
-          if (validPass === password) {
+          let isCustomerPassMatch = false;
+          if (validPass.startsWith('$2a$') || validPass.startsWith('$2b$')) {
+            isCustomerPassMatch = await bcrypt.compare(password, validPass);
+          } else {
+            isCustomerPassMatch = (validPass === password);
+          }
+          if (isCustomerPassMatch) {
             return res.json({
               success: true,
               role: 'customer',
@@ -361,7 +367,14 @@ export function createApiRouter(broadcastWs) {
       const loc = rows[0];
       const validPass = loc.customer_pass || '3AH@me';
 
-      if (validPass !== inputPass) {
+      let isPassMatch = false;
+      if (validPass.startsWith('$2a$') || validPass.startsWith('$2b$')) {
+        isPassMatch = await bcrypt.compare(inputPass, validPass);
+      } else {
+        isPassMatch = (validPass === inputPass);
+      }
+
+      if (!isPassMatch) {
         return res.status(401).json({ success: false, message: 'Mật khẩu khách hàng không chính xác.' });
       }
 
@@ -375,7 +388,12 @@ export function createApiRouter(broadcastWs) {
       let devices = [];
       if (gateway) {
         const [devs] = await pool.query(
-          'SELECT device_id, device_code, device_name, device_type, slave_address, floor FROM devices WHERE gateway_id = ? ORDER BY slave_address ASC',
+          `SELECT d.device_id, d.device_code, d.device_name, d.device_type, d.slave_address, d.floor,
+                  t.temperature, t.humidity, t.power, t.voltage, t.current, t.raw_data, t.recorded_at
+           FROM devices d
+           LEFT JOIN telemetry_data t ON d.device_id = t.device_id
+           WHERE d.gateway_id = ?
+           ORDER BY d.slave_address ASC`,
           [gateway.gateway_id]
         );
         devices = devs;
@@ -497,6 +515,74 @@ export function createApiRouter(broadcastWs) {
       res.json({ success: true, message: `Đã đặt lại mật khẩu về "${newPassword}" thành công!` });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message || 'Lỗi reset mật khẩu' });
+    }
+  });
+
+  // 12.0. Đổi mật khẩu tài khoản khách hàng bảng locations (hoặc nhân viên bảng login)
+  router.post('/change-password', async (req, res) => {
+    const { email, oldPassword, newPassword } = req.body || {};
+    const cleanEmail = (email || '').trim();
+    const cleanOldPass = (oldPassword || '').trim();
+    const cleanNewPass = (newPassword || '').trim();
+
+    if (!cleanEmail || !cleanOldPass || !cleanNewPass) {
+      return res.status(400).json({ success: false, message: 'Vui lòng điền đầy đủ Email, Mật khẩu cũ và Mật khẩu mới.' });
+    }
+
+    try {
+      // 1. Kiểm tra trong bảng locations của database 3ahome (khách hàng dự án)
+      const [locRows] = await pool.query(
+        'SELECT location_id, customer_pass FROM locations WHERE customer_email = ? LIMIT 1',
+        [cleanEmail]
+      );
+
+      if (locRows.length > 0) {
+        const loc = locRows[0];
+        const validPass = loc.customer_pass || '3AH@me';
+        let isMatch = false;
+        if (validPass.startsWith('$2a$') || validPass.startsWith('$2b$')) {
+          isMatch = await bcrypt.compare(cleanOldPass, validPass);
+        } else {
+          isMatch = (cleanOldPass === validPass);
+        }
+
+        // Nếu mật khẩu cũ nhập không trùng với hàng tương ứng với customer_email ở cột customer_pass
+        if (!isMatch) {
+          return res.status(401).json({ success: false, message: 'Bạn nhập sai password' });
+        }
+
+        // Nếu email và password cũ nhập vào cùng hàng trùng với cột customer_email và customer_pass
+        // thì lưu đè giá trị mật khẩu mới vào cột customer_pass
+        const hashed = await bcrypt.hash(cleanNewPass, 10);
+        await pool.query('UPDATE locations SET customer_pass = ? WHERE location_id = ?', [hashed, loc.location_id]);
+        return res.json({ success: true, message: 'Đổi mật khẩu thành công!' });
+      }
+
+      // 2. Kiểm tra trong bảng login (dành cho nhân viên, quản trị)
+      const [loginRows] = await pool.query('SELECT id, password FROM login WHERE gmail = ? LIMIT 1', [cleanEmail]);
+      if (loginRows.length > 0) {
+        const user = loginRows[0];
+        let isMatch = false;
+        if (user.password && (user.password.startsWith('$2a$') || user.password.startsWith('$2b$'))) {
+          isMatch = await bcrypt.compare(cleanOldPass, user.password);
+        } else {
+          isMatch = (cleanOldPass === user.password);
+        }
+
+        if (!isMatch) {
+          return res.status(401).json({ success: false, message: 'Bạn nhập sai password' });
+        }
+
+        const hashed = await bcrypt.hash(cleanNewPass, 10);
+        await pool.query('UPDATE login SET password = ? WHERE id = ?', [hashed, user.id]);
+        return res.json({ success: true, message: 'Đổi mật khẩu thành công!' });
+      }
+
+      // Nếu email nhập vào không trùng với bất kỳ hàng nào trong cột customer_email
+      return res.status(404).json({ success: false, message: 'Bạn nhập sai email' });
+    } catch (err) {
+      console.error('Lỗi khi đổi mật khẩu:', err);
+      res.status(500).json({ success: false, message: err.message || 'Lỗi xử lý đổi mật khẩu' });
     }
   });
 
@@ -1533,6 +1619,23 @@ export function createApiRouter(broadcastWs) {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS telemetry_history (
+          id BIGINT AUTO_INCREMENT PRIMARY KEY,
+          device_id INT NOT NULL,
+          temperature FLOAT DEFAULT NULL,
+          humidity FLOAT DEFAULT NULL,
+          power FLOAT DEFAULT NULL,
+          voltage FLOAT DEFAULT NULL,
+          current FLOAT DEFAULT NULL,
+          raw_data TEXT DEFAULT NULL,
+          recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          INDEX idx_telemetry_hist_dev_time (device_id, recorded_at),
+          INDEX idx_telemetry_hist_time (recorded_at),
+          CONSTRAINT fk_telemetry_hist_device FOREIGN KEY (device_id) REFERENCES devices (device_id) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+      `);
+
       // Nếu bảng locations rỗng, nạp dữ liệu mẫu ban đầu để hệ thống có dữ liệu hiển thị ngay
       const [check] = await pool.query('SELECT COUNT(*) as count FROM locations');
       if (check[0].count === 0) {
@@ -1680,10 +1783,19 @@ export function createApiRouter(broadcastWs) {
     const { projectName, address, phone, email, customer_pass, gateway, status, devices } = req.body;
     try {
       await ensureIotTables();
+      const rawPass = customer_pass || '3AH@me';
+      let hashedPass = rawPass;
+      try {
+        if (!rawPass.startsWith('$2a$') && !rawPass.startsWith('$2b$')) {
+          hashedPass = await bcrypt.hash(rawPass, 10);
+        }
+      } catch (hashErr) {
+        hashedPass = rawPass;
+      }
       const [locResult] = await pool.query(`
         INSERT INTO locations (location_name, address, customer_phone, customer_email, customer_pass, status)
         VALUES (?, ?, ?, ?, ?, ?)
-      `, [projectName, address, phone, email || null, customer_pass || '3AH@me', status || 'installing']);
+      `, [projectName, address, phone, email || null, hashedPass, status || 'installing']);
       const locationId = locResult.insertId;
 
       let gatewayId = null;
@@ -1855,6 +1967,24 @@ export function createApiRouter(broadcastWs) {
         JSON.stringify(m)
       ]);
 
+      // Lưu vào bảng telemetry_history để tích luỹ dữ liệu vẽ biểu đồ lịch sử tuần/tháng
+      try {
+        await pool.query(`
+          INSERT INTO telemetry_history (device_id, temperature, humidity, power, voltage, current, raw_data, recorded_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+        `, [
+          targetDeviceId,
+          (temp !== null && !isNaN(temp)) ? temp : null,
+          (humi !== null && !isNaN(humi)) ? humi : null,
+          (power !== null && !isNaN(power)) ? power : null,
+          (volt !== null && !isNaN(volt)) ? volt : null,
+          (curr !== null && !isNaN(curr)) ? curr : null,
+          JSON.stringify(m)
+        ]);
+      } catch (histErr) {
+        console.warn('⚠️ Lỗi lưu telemetry_history:', histErr.message);
+      }
+
       if (broadcastWs) {
         broadcastWs({
           type: 'TELEMETRY_DATA_SAVED',
@@ -1921,6 +2051,61 @@ export function createApiRouter(broadcastWs) {
       const [rows] = await pool.query(sql, params);
       res.json({ success: true, count: rows.length, data: rows });
     } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 9. Lấy dữ liệu lịch sử viễn trắc từ bảng telemetry_history theo dự án hoặc thiết bị để vẽ biểu đồ
+  router.get('/telemetry-history', async (req, res) => {
+    try {
+      const { project_name, location_id, device_ids, limit = 500 } = req.query;
+      let sql = `
+        SELECT 
+          h.id,
+          h.device_id,
+          d.device_code,
+          d.device_name,
+          d.device_type,
+          d.floor,
+          COALESCE(l.location_name, 'Dự án nội bộ') AS project_name,
+          l.location_id,
+          h.temperature,
+          h.humidity,
+          h.power,
+          h.voltage,
+          h.current,
+          h.raw_data,
+          DATE_FORMAT(h.recorded_at, '%Y-%m-%d %H:%i:%s') AS recorded_at,
+          DATE_FORMAT(h.recorded_at, '%H:%i %d/%m') AS time_label
+        FROM telemetry_history h
+        JOIN devices d ON h.device_id = d.device_id
+        LEFT JOIN gateways g ON d.gateway_id = g.gateway_id
+        LEFT JOIN locations l ON g.location_id = l.location_id
+        WHERE 1=1
+      `;
+      const params = [];
+      if (project_name) {
+        sql += ' AND l.location_name = ?';
+        params.push(String(project_name));
+      }
+      if (location_id) {
+        sql += ' AND l.location_id = ?';
+        params.push(Number(location_id));
+      }
+      if (device_ids) {
+        const idList = String(device_ids).split(',').map(s => Number(s.trim())).filter(n => !isNaN(n));
+        if (idList.length > 0) {
+          sql += ` AND h.device_id IN (${idList.map(() => '?').join(',')})`;
+          params.push(...idList);
+        }
+      }
+      sql += ' ORDER BY h.recorded_at ASC LIMIT ?';
+      params.push(Number(limit) || 500);
+
+      const [rows] = await pool.query(sql, params);
+      res.json({ success: true, count: rows.length, data: rows });
+    } catch (err) {
+      console.error('Lỗi truy vấn telemetry-history:', err);
       res.status(500).json({ success: false, message: err.message });
     }
   });
