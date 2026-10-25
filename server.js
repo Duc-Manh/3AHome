@@ -233,6 +233,10 @@ const aedesBroker = await Aedes.createBroker();
 const mqttServer = net.createServer(aedesBroker.handle.bind(aedesBroker));
 const MQTT_PORT = process.env.MQTT_PORT || 1883;
 
+mqttServer.on('error', (err) => {
+  console.warn(`⚠️ [MQTT Broker] Không thể mở cổng ${MQTT_PORT} (có thể đã có broker khác chạy):`, err.message);
+});
+
 mqttServer.listen(MQTT_PORT, '0.0.0.0', () => {
   console.log(`📡 MQTT Broker nội bộ đang lắng nghe trên cổng ${MQTT_PORT} (0.0.0.0)`);
 });
