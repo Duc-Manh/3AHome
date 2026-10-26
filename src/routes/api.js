@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { pool } from '../config/db.js';
-import { sendConsultNotificationMail } from '../services/mailService.js';
+import { sendConsultNotificationMail, sendCustomerAccountMail } from '../services/mailService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1826,9 +1826,35 @@ export function createApiRouter(broadcastWs) {
         }
       }
 
+      // Gửi email thông tin tài khoản đăng nhập cho khách hàng nếu có email hợp lệ
+      if (email && email.includes('@') && email !== 'Chưa cập nhật') {
+        sendCustomerAccountMail({
+          toEmail: email.trim(),
+          projectName: projectName || 'Dự án mới',
+          username: email.trim(),
+          password: '3AH@me'
+        }).catch((mailErr) => console.warn('Lỗi khi gửi email tài khoản:', mailErr));
+      }
+
       res.json({ success: true, message: 'Đã tạo dự án thành công vào database', locationId });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 2.1. API gửi email tài khoản khách hàng thủ công
+  router.post('/customer-projects/send-account-mail', async (req, res) => {
+    const { email, projectName, password } = req.body;
+    try {
+      const result = await sendCustomerAccountMail({
+        toEmail: email,
+        projectName: projectName || '3AHOME',
+        username: email,
+        password: password || '3AH@me'
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ success: false, error: err.message });
     }
   });
 

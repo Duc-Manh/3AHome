@@ -132,3 +132,98 @@ export async function sendConsultNotificationMail({
     return { success: false, error: error.message };
   }
 }
+
+/**
+ * Gửi email thông tin tài khoản đăng nhập cho khách hàng khi tạo dự án mới
+ */
+export async function sendCustomerAccountMail({
+  toEmail,
+  projectName = '',
+  username,
+  password = '3AH@me'
+}) {
+  if (!toEmail || !toEmail.includes('@') || toEmail === 'Chưa cập nhật') {
+    return { success: false, error: 'Email người nhận không hợp lệ' };
+  }
+
+  const subject = `[3AHOME] Thông tin tài khoản truy cập dự án: ${projectName || 'Hệ thống Smart IoT'}`;
+  const userLogin = username || toEmail;
+
+  const htmlContent = `
+    <!DOCTYPE html>
+    <html lang="vi">
+    <head>
+      <meta charset="utf-8">
+      <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f8fafc; margin: 0; padding: 20px; color: #1e293b; }
+        .mail-card { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 14px; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,0.08); border: 1px solid #e2e8f0; }
+        .mail-header { background: linear-gradient(135deg, #1D58BB 0%, #153e85 100%); padding: 26px 20px; text-align: center; color: #ffffff; }
+        .mail-header h1 { margin: 0 0 6px 0; font-size: 20px; font-weight: 700; letter-spacing: 0.5px; }
+        .mail-header p { margin: 0; font-size: 13px; opacity: 0.9; }
+        .mail-body { padding: 28px 24px; }
+        .tag-badge { display: inline-block; background-color: #dbeafe; color: #1D58BB; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 700; margin-bottom: 16px; }
+        .cred-table { width: 100%; border-collapse: collapse; margin-top: 14px; margin-bottom: 14px; background: #f8fafc; border-radius: 8px; overflow: hidden; border: 1px solid #e2e8f0; }
+        .cred-table td { padding: 12px 16px; border-bottom: 1px solid #e2e8f0; font-size: 14px; }
+        .cred-table td.label { width: 42%; font-weight: 600; color: #64748b; background-color: #f1f5f9; }
+        .cred-table td.value { width: 58%; font-weight: 700; color: #0f172a; }
+        .btn-access { display: inline-block; background: #1D58BB; color: #ffffff !important; text-decoration: none; padding: 11px 24px; border-radius: 8px; font-weight: 600; font-size: 13.5px; margin-top: 16px; }
+        .mail-footer { background-color: #f1f5f9; padding: 18px 24px; text-align: center; font-size: 12px; color: #64748b; border-top: 1px solid #e2e8f0; }
+      </style>
+    </head>
+    <body>
+      <div class="mail-card">
+        <div class="mail-header">
+          <h1>3AHOME VIỆT NAM</h1>
+          <p>Hệ thống BMS &amp; Giải pháp Điều khiển Thông minh Smart IoT</p>
+        </div>
+        <div class="mail-body">
+          <div class="tag-badge">🔑 TÀI KHOẢN TRUY CẬP DỰ ÁN</div>
+          <p style="font-size: 14.5px; line-height: 1.6; color: #1e293b; margin-top: 0;">
+            Kính gửi Quý khách hàng,<br/>
+            Hệ thống 3AHOME vừa khởi tạo thành công thông tin dự án <strong>${projectName}</strong>. Dưới đây là thông tin tài khoản đăng nhập để Quý khách quản lý và giám sát hệ thống:
+          </p>
+
+          <table class="cred-table">
+            <tr>
+              <td class="label">Tài khoản đăng nhập:</td>
+              <td class="value" style="color: #1D58BB; font-size: 15px;">${userLogin}</td>
+            </tr>
+            <tr>
+              <td class="label">Mật khẩu mặc định:</td>
+              <td class="value" style="font-family: monospace; font-size: 16px; color: #ea580c; letter-spacing: 1px;">${password}</td>
+            </tr>
+          </table>
+
+          <p style="font-size: 13px; color: #64748b; line-height: 1.5; margin-top: 14px;">
+            * Quý khách có thể sử dụng tài khoản này để đăng nhập vào Web Portal hoặc Ứng dụng di động 3AHOME.<br/>
+            * Sau khi đăng nhập lần đầu, Quý khách nên tiến hành đổi mật khẩu để bảo đảm an toàn thông tin.
+          </p>
+
+          <div style="text-align: center; margin-top: 20px;">
+            <a href="https://3ahome.vn" class="btn-access">Đăng nhập vào Hệ thống 3AHOME</a>
+          </div>
+        </div>
+
+        <div class="mail-footer">
+          Email này được gửi tự động từ hệ thống quản trị <strong>3AHOME Vietnam</strong>.<br/>
+          Hỗ trợ kỹ thuật: 3ahomeadmin@gmail.com | Website: <a href="https://3ahome.vn" style="color: #1D58BB;">https://3ahome.vn</a>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  try {
+    const info = await mailTransporter.sendMail({
+      from: `"${process.env.SMTP_FROM_NAME || '3AHOME Vietnam'}" <${smtpUser}>`,
+      to: toEmail,
+      subject: subject,
+      html: htmlContent
+    });
+    console.log(`✅ [Nodemailer] Đã gửi thông tin tài khoản dự án tới ${toEmail}! MessageId: ${info.messageId}`);
+    return { success: true, messageId: info.messageId };
+  } catch (error) {
+    console.error('❌ [Nodemailer] Lỗi gửi thông tin tài khoản tới khách hàng:', error);
+    return { success: false, error: error.message };
+  }
+}
