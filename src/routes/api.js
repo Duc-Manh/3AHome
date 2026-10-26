@@ -500,6 +500,29 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
+  // 7.2. API Lấy thông tin tài khoản dự án khách hàng (từ bảng locations)
+  router.get('/customer-profile', async (req, res) => {
+    try {
+      await ensureIotTables();
+      const email = (req.query.email || '').trim().toLowerCase();
+      let query = 'SELECT location_id, location_name, address, customer_name, customer_phone, customer_email, status, created_at FROM locations';
+      let params = [];
+      if (email) {
+        query += ' WHERE LOWER(customer_email) = ? LIMIT 1';
+        params.push(email);
+      } else {
+        query += ' ORDER BY location_id DESC LIMIT 1';
+      }
+      const [rows] = await pool.query(query, params);
+      if (rows.length === 0) {
+        return res.status(404).json({ success: false, message: 'Không tìm thấy thông tin tài khoản.' });
+      }
+      return res.json({ success: true, data: rows[0] });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
   // 6. API Gửi OTP Xác thực qua Email (Hỗ trợ 2FA & Đổi mật khẩu)
   router.post('/auth/send-otp', authLimiter, async (req, res) => {
     const { email } = req.body;
