@@ -2151,16 +2151,30 @@ export function createApiRouter(broadcastWs) {
         total DECIMAL(15, 2) DEFAULT 0,
         invoice VARCHAR(100) DEFAULT '',
         time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        \`time-in\` DATETIME NULL,
+        \`time-out\` DATETIME NULL,
         status VARCHAR(50) DEFAULT 'Tồn kho'
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
+    try {
+      const [cols] = await pool.query('SHOW COLUMNS FROM storage');
+      const colNames = cols.map((c) => c.Field);
+      if (!colNames.includes('time-in')) {
+        await pool.query('ALTER TABLE storage ADD COLUMN `time-in` DATETIME NULL');
+      }
+      if (!colNames.includes('time-out')) {
+        await pool.query('ALTER TABLE storage ADD COLUMN `time-out` DATETIME NULL');
+      }
+    } catch (migrErr) {
+      console.warn('Lỗi kiểm tra cột time-in, time-out:', migrErr.message);
+    }
   }
 
   // 1. Lấy danh sách vật tư kho
   router.get('/storage', async (req, res) => {
     try {
       await ensureStorageTable();
-      const [rows] = await pool.query('SELECT * FROM storage ORDER BY id DESC');
+      const [rows] = await pool.query('SELECT *, `time-in` AS time_in, `time-out` AS time_out FROM storage ORDER BY id DESC');
       res.json({ success: true, data: rows });
     } catch (err) {
       console.error('Lỗi lấy danh sách storage:', err);
@@ -2179,11 +2193,14 @@ export function createApiRouter(broadcastWs) {
       const qty = Number(quantity) || 1;
       const prc = Number(price) || 0;
       const tot = total !== undefined && total !== null ? Number(total) : qty * prc;
-      const itemTime = time ? new Date(time) : new Date();
+      const rawTimeIn = req.body['time-in'] || req.body.time_in || time || null;
+      const rawTimeOut = req.body['time-out'] || req.body.time_out || null;
+      const parsedTimeIn = rawTimeIn ? new Date(rawTimeIn) : new Date();
+      const parsedTimeOut = rawTimeOut ? new Date(rawTimeOut) : null;
 
       const [result] = await pool.query(`
-        INSERT INTO storage (device_code, name, unit, quantity, price, total, invoice, time, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO storage (device_code, name, unit, quantity, price, total, invoice, time, \`time-in\`, \`time-out\`, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         device_code.trim().toUpperCase(),
         name.trim(),
@@ -2192,7 +2209,9 @@ export function createApiRouter(broadcastWs) {
         prc,
         tot,
         (invoice || '').trim(),
-        itemTime,
+        parsedTimeIn,
+        parsedTimeIn,
+        parsedTimeOut,
         (status || 'Tồn kho').trim()
       ]);
 
@@ -2208,10 +2227,15 @@ export function createApiRouter(broadcastWs) {
     try {
       await ensureStorageTable();
       const { id } = req.params;
-      const { device_code, name, unit, quantity, price, total, invoice, time, status } = req.body;
+      const { device_code, name, unit, quantity, price, total, invoice, status } = req.body;
       const qty = Number(quantity) || 1;
       const prc = Number(price) || 0;
       const tot = total !== undefined && total !== null ? Number(total) : qty * prc;
+
+      const rawTimeIn = req.body['time-in'] !== undefined ? req.body['time-in'] : req.body.time_in;
+      const rawTimeOut = req.body['time-out'] !== undefined ? req.body['time-out'] : req.body.time_out;
+      const parsedTimeIn = rawTimeIn ? new Date(rawTimeIn) : null;
+      const parsedTimeOut = rawTimeOut ? new Date(rawTimeOut) : null;
 
       await pool.query(`
         UPDATE storage SET
@@ -2222,13 +2246,23 @@ export function createApiRouter(broadcastWs) {
           price = ?,
           total = ?,
           invoice = ?,
-          status = ?
-          ${time ? ', time = ?' : ''}
+          status = ?,
+          \`time-in\` = ?,
+          \`time-out\` = ?
         WHERE id = ?
-      `, time
-        ? [device_code.trim().toUpperCase(), name.trim(), (unit || 'Cái').trim(), qty, prc, tot, (invoice || '').trim(), (status || 'Tồn kho').trim(), new Date(time), id]
-        : [device_code.trim().toUpperCase(), name.trim(), (unit || 'Cái').trim(), qty, prc, tot, (invoice || '').trim(), (status || 'Tồn kho').trim(), id]
-      );
+      `, [
+        device_code.trim().toUpperCase(),
+        name.trim(),
+        (unit || 'Cái').trim(),
+        qty,
+        prc,
+        tot,
+        (invoice || '').trim(),
+        (status || 'Tồn kho').trim(),
+        parsedTimeIn,
+        parsedTimeOut,
+        id
+      ]);
 
       res.json({ success: true, message: 'Đã cập nhật thông tin vật tư thành công' });
     } catch (err) {
