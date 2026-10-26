@@ -2147,6 +2147,8 @@ export function createApiRouter(broadcastWs) {
         name VARCHAR(255) NOT NULL,
         unit VARCHAR(50) DEFAULT 'Cái',
         quantity INT NOT NULL DEFAULT 1,
+        \`quantity-out\` INT DEFAULT 0,
+        \`quantity-remain\` INT DEFAULT 0,
         price DECIMAL(15, 2) DEFAULT 0,
         total DECIMAL(15, 2) DEFAULT 0,
         invoice VARCHAR(100) DEFAULT '',
@@ -2165,8 +2167,14 @@ export function createApiRouter(broadcastWs) {
       if (!colNames.includes('time-out')) {
         await pool.query('ALTER TABLE storage ADD COLUMN `time-out` DATETIME NULL');
       }
+      if (!colNames.includes('quantity-out')) {
+        await pool.query('ALTER TABLE storage ADD COLUMN `quantity-out` INT DEFAULT 0');
+      }
+      if (!colNames.includes('quantity-remain')) {
+        await pool.query('ALTER TABLE storage ADD COLUMN `quantity-remain` INT DEFAULT 0');
+      }
     } catch (migrErr) {
-      console.warn('Lỗi kiểm tra cột time-in, time-out:', migrErr.message);
+      console.warn('Lỗi kiểm tra cột time-in, time-out, quantity:', migrErr.message);
     }
   }
 
@@ -2174,7 +2182,7 @@ export function createApiRouter(broadcastWs) {
   router.get('/storage', async (req, res) => {
     try {
       await ensureStorageTable();
-      const [rows] = await pool.query('SELECT *, `time-in` AS time_in, `time-out` AS time_out FROM storage ORDER BY id DESC');
+      const [rows] = await pool.query('SELECT *, `time-in` AS time_in, `time-out` AS time_out, `quantity-out` AS quantity_out, `quantity-remain` AS quantity_remain FROM storage ORDER BY id DESC');
       res.json({ success: true, data: rows });
     } catch (err) {
       console.error('Lỗi lấy danh sách storage:', err);
@@ -2191,6 +2199,10 @@ export function createApiRouter(broadcastWs) {
         return res.status(400).json({ success: false, message: 'Vui lòng nhập Mã thiết bị và Tên vật tư' });
       }
       const qty = Number(quantity) || 1;
+      const qtyOut = Number(req.body['quantity-out'] !== undefined ? req.body['quantity-out'] : (req.body.quantity_out ?? 0)) || 0;
+      const qtyRemain = req.body['quantity-remain'] !== undefined
+        ? Number(req.body['quantity-remain'])
+        : (req.body.quantity_remain !== undefined ? Number(req.body.quantity_remain) : Math.max(0, qty - qtyOut));
       const prc = Number(price) || 0;
       const tot = total !== undefined && total !== null ? Number(total) : qty * prc;
       const rawTimeIn = req.body['time-in'] || req.body.time_in || time || null;
@@ -2199,13 +2211,15 @@ export function createApiRouter(broadcastWs) {
       const parsedTimeOut = rawTimeOut ? new Date(rawTimeOut) : null;
 
       const [result] = await pool.query(`
-        INSERT INTO storage (device_code, name, unit, quantity, price, total, invoice, time, \`time-in\`, \`time-out\`, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO storage (device_code, name, unit, quantity, \`quantity-out\`, \`quantity-remain\`, price, total, invoice, time, \`time-in\`, \`time-out\`, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         device_code.trim().toUpperCase(),
         name.trim(),
         (unit || 'Cái').trim(),
         qty,
+        qtyOut,
+        qtyRemain,
         prc,
         tot,
         (invoice || '').trim(),
@@ -2229,6 +2243,10 @@ export function createApiRouter(broadcastWs) {
       const { id } = req.params;
       const { device_code, name, unit, quantity, price, total, invoice, status } = req.body;
       const qty = Number(quantity) || 1;
+      const rawQtyOut = req.body['quantity-out'] !== undefined ? req.body['quantity-out'] : req.body.quantity_out;
+      const rawQtyRemain = req.body['quantity-remain'] !== undefined ? req.body['quantity-remain'] : req.body.quantity_remain;
+      const qtyOut = rawQtyOut !== undefined ? (Number(rawQtyOut) || 0) : 0;
+      const qtyRemain = rawQtyRemain !== undefined ? Number(rawQtyRemain) : Math.max(0, qty - qtyOut);
       const prc = Number(price) || 0;
       const tot = total !== undefined && total !== null ? Number(total) : qty * prc;
 
@@ -2243,6 +2261,8 @@ export function createApiRouter(broadcastWs) {
           name = ?,
           unit = ?,
           quantity = ?,
+          \`quantity-out\` = ?,
+          \`quantity-remain\` = ?,
           price = ?,
           total = ?,
           invoice = ?,
@@ -2255,6 +2275,8 @@ export function createApiRouter(broadcastWs) {
         name.trim(),
         (unit || 'Cái').trim(),
         qty,
+        qtyOut,
+        qtyRemain,
         prc,
         tot,
         (invoice || '').trim(),
