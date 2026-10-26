@@ -2136,6 +2136,120 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
+  // ============================================================
+  // QUẢN LÝ VẬT TƯ & KHO HÀNG (Bảng storage)
+  // ============================================================
+  async function ensureStorageTable() {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS storage (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        device_code VARCHAR(100) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        unit VARCHAR(50) DEFAULT 'Cái',
+        quantity INT NOT NULL DEFAULT 1,
+        price DECIMAL(15, 2) DEFAULT 0,
+        total DECIMAL(15, 2) DEFAULT 0,
+        invoice VARCHAR(100) DEFAULT '',
+        time DATETIME DEFAULT CURRENT_TIMESTAMP,
+        status VARCHAR(50) DEFAULT 'Tồn kho'
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+  }
+
+  // 1. Lấy danh sách vật tư kho
+  router.get('/storage', async (req, res) => {
+    try {
+      await ensureStorageTable();
+      const [rows] = await pool.query('SELECT * FROM storage ORDER BY id DESC');
+      res.json({ success: true, data: rows });
+    } catch (err) {
+      console.error('Lỗi lấy danh sách storage:', err);
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 2. Thêm mới vật tư
+  router.post('/storage', async (req, res) => {
+    try {
+      await ensureStorageTable();
+      const { device_code, name, unit, quantity, price, total, invoice, time, status } = req.body;
+      if (!device_code || !name) {
+        return res.status(400).json({ success: false, message: 'Vui lòng nhập Mã thiết bị và Tên vật tư' });
+      }
+      const qty = Number(quantity) || 1;
+      const prc = Number(price) || 0;
+      const tot = total !== undefined && total !== null ? Number(total) : qty * prc;
+      const itemTime = time ? new Date(time) : new Date();
+
+      const [result] = await pool.query(`
+        INSERT INTO storage (device_code, name, unit, quantity, price, total, invoice, time, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        device_code.trim().toUpperCase(),
+        name.trim(),
+        (unit || 'Cái').trim(),
+        qty,
+        prc,
+        tot,
+        (invoice || '').trim(),
+        itemTime,
+        (status || 'Tồn kho').trim()
+      ]);
+
+      res.json({ success: true, message: 'Đã thêm vật tư thành công', id: result.insertId });
+    } catch (err) {
+      console.error('Lỗi thêm vật tư storage:', err);
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 3. Sửa thông tin vật tư
+  router.put('/storage/:id', async (req, res) => {
+    try {
+      await ensureStorageTable();
+      const { id } = req.params;
+      const { device_code, name, unit, quantity, price, total, invoice, time, status } = req.body;
+      const qty = Number(quantity) || 1;
+      const prc = Number(price) || 0;
+      const tot = total !== undefined && total !== null ? Number(total) : qty * prc;
+
+      await pool.query(`
+        UPDATE storage SET
+          device_code = ?,
+          name = ?,
+          unit = ?,
+          quantity = ?,
+          price = ?,
+          total = ?,
+          invoice = ?,
+          status = ?
+          ${time ? ', time = ?' : ''}
+        WHERE id = ?
+      `, time
+        ? [device_code.trim().toUpperCase(), name.trim(), (unit || 'Cái').trim(), qty, prc, tot, (invoice || '').trim(), (status || 'Tồn kho').trim(), new Date(time), id]
+        : [device_code.trim().toUpperCase(), name.trim(), (unit || 'Cái').trim(), qty, prc, tot, (invoice || '').trim(), (status || 'Tồn kho').trim(), id]
+      );
+
+      res.json({ success: true, message: 'Đã cập nhật thông tin vật tư thành công' });
+    } catch (err) {
+      console.error('Lỗi cập nhật vật tư storage:', err);
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 4. Xóa vật tư khỏi kho
+  router.delete('/storage/:id', async (req, res) => {
+    try {
+      await ensureStorageTable();
+      const { id } = req.params;
+      await pool.query('DELETE FROM storage WHERE id = ?', [id]);
+      res.json({ success: true, message: 'Đã xóa vật tư khỏi kho' });
+    } catch (err) {
+      console.error('Lỗi xóa vật tư storage:', err);
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
   return router;
 }
 
