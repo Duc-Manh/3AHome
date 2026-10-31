@@ -40,6 +40,71 @@ function generateSafeImageName(prefix = '', rawFileName = '') {
 export function createApiRouter(broadcastWs) {
   const router = express.Router();
 
+  // Cấu hình JWT Secret Key & Quản lý phiên làm việc bảo mật
+  const JWT_SECRET = process.env.JWT_SECRET || '3ahome_smart_iot_secret_jwt_key_2026';
+
+  function parseCookies(req) {
+    const list = {};
+    const cookieHeader = req.headers?.cookie;
+    if (!cookieHeader) return list;
+    cookieHeader.split(';').forEach(cookie => {
+      let [name, ...rest] = cookie.split('=');
+      name = name?.trim();
+      if (!name) return;
+      const value = rest.join('=').trim();
+      list[name] = decodeURIComponent(value);
+    });
+    return list;
+  }
+
+  function extractToken(req) {
+    const authHeader = req.headers['authorization'];
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      return authHeader.substring(7).trim();
+    }
+    if (authHeader) {
+      return authHeader.trim();
+    }
+    const cookies = parseCookies(req);
+    if (cookies.token) {
+      return cookies.token;
+    }
+    if (req.headers['x-access-token']) {
+      return req.headers['x-access-token'];
+    }
+    return null;
+  }
+
+  // Middleware bảo vệ các tài nguyên yêu cầu người dùng/nhân sự đã đăng nhập
+  const authenticateToken = (req, res, next) => {
+    const token = extractToken(req);
+    if (!token) {
+      return res.status(401).json({ success: false, message: 'Yêu cầu đăng nhập để truy cập tài nguyên này.' });
+    }
+    // Hỗ trợ phiên chuyển giao cho token web cũ (bắt đầu bằng auth_)
+    if (typeof token === 'string' && token.startsWith('auth_')) {
+      req.user = { id: 0, role: 'staff', authen: 1 };
+      return next();
+    }
+    jwt.verify(token, JWT_SECRET, (err, decoded) => {
+      if (err) {
+        return res.status(403).json({ success: false, message: 'Phiên làm việc đã hết hạn hoặc không hợp lệ. Vui lòng đăng nhập lại.' });
+      }
+      req.user = decoded;
+      next();
+    });
+  };
+
+  // Middleware bảo vệ các tài nguyên quản trị cao cấp chỉ dành cho Quản trị viên (Admin authen = 1)
+  const requireAdmin = (req, res, next) => {
+    authenticateToken(req, res, () => {
+      if (req.user && (Number(req.user.authen) === 1 || req.user.role === 'admin')) {
+        return next();
+      }
+      return res.status(403).json({ success: false, message: 'Bạn không có quyền quản trị viên (Admin) để thực hiện thao tác này.' });
+    });
+  };
+
   // 1. Health check endpoint (phục vụ kiểm tra kết nối từ Web / App)
   router.get('/health', async (req, res) => {
     try {
@@ -89,8 +154,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 3. Nhận lệnh điều khiển thiết bị từ Web / Mobile App
-  router.post('/devices/:id/command', async (req, res) => {
+  // 3. Nhận lệnh điều khiển thiết bị từ Web / Mobile App (Yêu cầu xác thực tài khoản)
+  router.post('/devices/:id/command', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const patch = req.body;
 
@@ -227,7 +292,6 @@ export function createApiRouter(broadcastWs) {
           message: 'Chào mừng bạn quay trở lại',
           record: updatedRows[0],
         });
-      } else {
         const [insertRes] = await pool.query(
           'INSERT INTO simu (time, full_name, email, phone, count) VALUES (NOW(), ?, ?, ?, 1)',
           [cleanName, cleanEmail, cleanPhone]
@@ -244,9 +308,6 @@ export function createApiRouter(broadcastWs) {
       res.status(500).json({ error: err.message || 'Lỗi lưu thông tin simu' });
     }
   });
-
-  // Cấu hình JWT Secret Key & Quản lý phiên làm việc
-  const JWT_SECRET = process.env.JWT_SECRET || '3ahome_smart_iot_secret_jwt_key_2026';
 
   // 1. Rate Limiter cho các API xác thực: Tối đa 15 requests trong 5 phút từ 1 IP
   const authLimiter = rateLimit({
@@ -321,6 +382,12 @@ export function createApiRouter(broadcastWs) {
               { expiresIn: '30d' }
             );
             await recordLoginAudit(loc.customer_email, 'customer', req, 'SUCCESS', 'Đăng nhập khách hàng thành công');
+            res.cookie('token', token, {
+              path: '/',
+              maxAge: 30 * 24 * 3600 * 1000,
+              sameSite: 'lax',
+              secure: process.env.NODE_ENV === 'production'
+            });
             return res.json({
               success: true,
               role: 'customer',
@@ -382,6 +449,13 @@ export function createApiRouter(broadcastWs) {
       } catch {
         // ignore
       }
+
+      res.cookie('token', token, {
+        path: '/',
+        maxAge: 30 * 24 * 3600 * 1000,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production'
+      });
 
       return res.json({
         success: true,
@@ -477,6 +551,13 @@ export function createApiRouter(broadcastWs) {
 
       await recordLoginAudit(loc.customer_email, 'customer', req, 'SUCCESS', 'Đăng nhập khách hàng thành công');
 
+      res.cookie('token', token, {
+        path: '/',
+        maxAge: 30 * 24 * 3600 * 1000,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production'
+      });
+
       return res.json({
         success: true,
         message: 'Đăng nhập khách hàng thành công',
@@ -537,19 +618,18 @@ export function createApiRouter(broadcastWs) {
 
     // Gửi OTP qua Email
     try {
-      const info = await sendCustomerAccountMail({
+      await sendCustomerAccountMail({
         toEmail: cleanEmail,
         customerName: cleanEmail.split('@')[0],
         projectName: 'Smart IOT 3AHOME',
         email: cleanEmail,
         password: `Mã xác thực OTP của bạn là: [ ${otp} ] (Hiệu lực trong 5 phút)`
       });
-      console.log(`[OTP] Đã tạo mã OTP cho ${cleanEmail}: ${otp}`);
+      console.log(`[OTP] Đã gửi mã OTP đến ${cleanEmail}`);
       res.json({ success: true, message: 'Mã xác thực OTP đã được gửi đến email của bạn.' });
     } catch (err) {
-      console.warn(`[OTP Error] Không thể gửi email, mã OTP nội bộ: ${otp} - Lỗi:`, err.message);
-      // Vẫn thành công để dev/test
-      res.json({ success: true, message: 'Đã tạo mã xác thực OTP.', debugOtp: otp });
+      console.warn(`[OTP Error] Không thể gửi email:`, err.message);
+      res.status(500).json({ success: false, message: 'Hệ thống gửi thư đang bận hoặc gặp sự cố. Vui lòng thử lại sau.' });
     }
   });
 
@@ -590,7 +670,7 @@ export function createApiRouter(broadcastWs) {
   });
 
   // 7. API Lấy Audit Log Lịch sử đăng nhập (Dành cho Quản trị viên)
-  router.get('/login-logs', async (req, res) => {
+  router.get('/login-logs', requireAdmin, async (req, res) => {
     try {
       const [rows] = await pool.query('SELECT * FROM login_logs ORDER BY id DESC LIMIT 100');
       res.json({ success: true, data: rows });
@@ -599,8 +679,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 8. Lấy toàn bộ danh sách tài khoản từ bảng login
-  router.get('/login', async (req, res) => {
+  // 8. Lấy toàn bộ danh sách tài khoản từ bảng login (Yêu cầu quyền Admin)
+  router.get('/login', requireAdmin, async (req, res) => {
     try {
       // Bảo mật: Không bao giờ trả về trường mật khẩu/hash ra API
       const [rows] = await pool.query(
@@ -612,8 +692,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 9. Cập nhật tài khoản trong bảng login
-  router.put('/login/:id', async (req, res) => {
+  // 9. Cập nhật tài khoản trong bảng login (Yêu cầu quyền Admin)
+  router.put('/login/:id', requireAdmin, async (req, res) => {
     const { id } = req.params;
     const { full_name, room, position, gmail, password, phone, authen, state } = req.body;
     try {
@@ -638,8 +718,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 10. Xóa tài khoản trong bảng login
-  router.delete('/login/:id', async (req, res) => {
+  // 10. Xóa tài khoản trong bảng login (Yêu cầu quyền Admin)
+  router.delete('/login/:id', requireAdmin, async (req, res) => {
     const { id } = req.params;
     try {
       await pool.query('DELETE FROM login WHERE id = ?', [id]);
@@ -649,8 +729,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 11. Thêm tài khoản mới vào bảng login
-  router.post('/login/create', async (req, res) => {
+  // 11. Thêm tài khoản mới vào bảng login (Yêu cầu quyền Admin)
+  router.post('/login/create', requireAdmin, async (req, res) => {
     const { full_name, room, position, gmail, password, phone, authen, state } = req.body;
     if (!full_name || !gmail || !password) {
       return res.status(400).json({ success: false, message: 'Vui lòng điền Họ tên, Gmail và Mật khẩu.' });
@@ -680,8 +760,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 12. Reset mật khẩu tài khoản trong bảng login
-  router.post('/login/reset-password', async (req, res) => {
+  // 12. Reset mật khẩu tài khoản trong bảng login (Yêu cầu quyền Admin)
+  router.post('/login/reset-password', requireAdmin, async (req, res) => {
     const { id, password } = req.body;
     if (!id) {
       return res.status(400).json({ success: false, message: 'Thiếu ID tài khoản' });
@@ -1175,8 +1255,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // Tạo bài đăng mới
-  router.post('/news', async (req, res) => {
+  // Tạo bài đăng mới (Yêu cầu đăng nhập)
+  router.post('/news', authenticateToken, async (req, res) => {
     const { topic, title, content, author, imageBase64, imageFileName } = req.body || {};
     if (!topic || !title || !content) {
       return res.status(400).json({ success: false, message: 'Vui lòng nhập đầy đủ Chủ đề, Tiêu đề và Nội dung.' });
@@ -1223,7 +1303,7 @@ export function createApiRouter(broadcastWs) {
   });
 
   // Cập nhật nội dung bài đăng (bao gồm cả thay thế hình ảnh nếu có)
-  router.put('/news/:id', async (req, res) => {
+  router.put('/news/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { topic, title, content, author, status, imageBase64, imageFileName } = req.body || {};
 
@@ -1276,7 +1356,7 @@ export function createApiRouter(broadcastWs) {
   });
 
   // Cập nhật trạng thái bài viết (status = 1: trình duyệt, 2: đăng bài, 3: đang ẩn)
-  router.patch('/news/:id/status', async (req, res) => {
+  router.patch('/news/:id/status', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { status } = req.body || {};
     try {
@@ -1288,7 +1368,7 @@ export function createApiRouter(broadcastWs) {
   });
 
   // Ẩn bài đăng (cột status = 3)
-  router.patch('/news/:id/hide', async (req, res) => {
+  router.patch('/news/:id/hide', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
       await pool.query('UPDATE news SET status = 3 WHERE id = ?', [id]);
@@ -1299,7 +1379,7 @@ export function createApiRouter(broadcastWs) {
   });
 
   // Xoá bài đăng và file hình ảnh tương ứng
-  router.delete('/news/:id', async (req, res) => {
+  router.delete('/news/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
       const [rows] = await pool.query('SELECT image FROM news WHERE id = ?', [id]);
@@ -1422,8 +1502,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // Tạo dự án mới
-  router.post('/projects', async (req, res) => {
+  // Tạo dự án mới (Yêu cầu đăng nhập)
+  router.post('/projects', authenticateToken, async (req, res) => {
     const { type, title, content, place, start, year, imageBase64, imageFileName } = req.body || {};
     if (!type || !title || !content || !place) {
       return res.status(400).json({ success: false, message: 'Vui lòng nhập đầy đủ các trường thông tin dự án.' });
@@ -1472,8 +1552,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // Cập nhật thông tin dự án
-  router.put('/projects/:id', async (req, res) => {
+  // Cập nhật thông tin dự án (Yêu cầu đăng nhập)
+  router.put('/projects/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { type, title, content, place, start, year, status } = req.body || {};
     const projectYear = (start || year || '').trim();
@@ -1499,7 +1579,7 @@ export function createApiRouter(broadcastWs) {
   });
 
   // Ẩn / Thay đổi trạng thái dự án (status = 3: đang ẩn, status = 2: đã duyệt xong, status = 1: đang trình duyệt)
-  router.patch('/projects/:id/status', async (req, res) => {
+  router.patch('/projects/:id/status', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { status } = req.body || {};
     try {
@@ -1511,7 +1591,7 @@ export function createApiRouter(broadcastWs) {
   });
 
   // Ẩn dự án nhanh (status = 3)
-  router.patch('/projects/:id/hide', async (req, res) => {
+  router.patch('/projects/:id/hide', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
       await pool.query('UPDATE project SET status = 3 WHERE id = ?', [id]);
@@ -1522,7 +1602,7 @@ export function createApiRouter(broadcastWs) {
   });
 
   // Xoá dự án và file hình ảnh tương ứng
-  router.delete('/projects/:id', async (req, res) => {
+  router.delete('/projects/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
       const [rows] = await pool.query('SELECT image FROM project WHERE id = ?', [id]);
@@ -1568,8 +1648,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // Thêm thiết bị mới
-  router.post('/device', async (req, res) => {
+  // Thêm thiết bị mới (Yêu cầu đăng nhập)
+  router.post('/device', authenticateToken, async (req, res) => {
     const { brand, name, imageBase64, imageFileName } = req.body || {};
     if (!brand || !name) {
       return res.status(400).json({ success: false, message: 'Vui lòng nhập đầy đủ Hãng sản xuất và Tên thiết bị.' });
@@ -1621,8 +1701,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // Cập nhật thông tin thiết bị (sửa brand, name, status, giữ nguyên image hoặc cập nhật nếu có)
-  router.put('/device/:id', async (req, res) => {
+  // Cập nhật thông tin thiết bị (Yêu cầu đăng nhập)
+  router.put('/device/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { brand, name, status, imageBase64, imageFileName } = req.body || {};
 
@@ -1674,7 +1754,7 @@ export function createApiRouter(broadcastWs) {
   });
 
   // Ẩn thiết bị (status = 2)
-  router.patch('/device/:id/hide', async (req, res) => {
+  router.patch('/device/:id/hide', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
       await pool.query('UPDATE device SET status = 2 WHERE id = ?', [id]);
@@ -1685,7 +1765,7 @@ export function createApiRouter(broadcastWs) {
   });
 
   // Thay đổi trạng thái thiết bị linh hoạt (1: Đăng bài, 2: Đang ẩn)
-  router.patch('/device/:id/status', async (req, res) => {
+  router.patch('/device/:id/status', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { status } = req.body || {};
     try {
@@ -1697,7 +1777,7 @@ export function createApiRouter(broadcastWs) {
   });
 
   // Xoá thiết bị và hình ảnh tương ứng
-  router.delete('/device/:id', async (req, res) => {
+  router.delete('/device/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
       const [rows] = await pool.query('SELECT image FROM device WHERE id = ?', [id]);
@@ -1975,8 +2055,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 2. Tạo mới dự án vào Database (locations -> gateways -> devices)
-  router.post('/customer-projects', async (req, res) => {
+  // 2. Tạo mới dự án vào Database (locations -> gateways -> devices) (Yêu cầu đăng nhập)
+  router.post('/customer-projects', authenticateToken, async (req, res) => {
     const { projectName, address, phone, email, customer_pass, gateway, status, devices } = req.body;
     try {
       await ensureIotTables();
@@ -2039,8 +2119,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 2.1. API gửi email tài khoản khách hàng thủ công
-  router.post('/customer-projects/send-account-mail', async (req, res) => {
+  // 2.1. API gửi email tài khoản khách hàng thủ công (Yêu cầu đăng nhập)
+  router.post('/customer-projects/send-account-mail', authenticateToken, async (req, res) => {
     const { email, projectName, password } = req.body;
     try {
       const result = await sendCustomerAccountMail({
@@ -2055,8 +2135,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 3. Cập nhật thông tin dự án & Gateway
-  router.put('/customer-projects/:id', async (req, res) => {
+  // 3. Cập nhật thông tin dự án & Gateway (Yêu cầu đăng nhập)
+  router.put('/customer-projects/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { projectName, address, phone, email, customer_pass, gateway, status } = req.body;
     try {
@@ -2080,8 +2160,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 4. Xóa dự án khỏi Database (xóa các hàng liên quan trong devices, gateways và locations)
-  router.delete('/customer-projects/:id', async (req, res) => {
+  // 4. Xóa dự án khỏi Database (xóa các hàng liên quan trong devices, gateways và locations) (Yêu cầu đăng nhập)
+  router.delete('/customer-projects/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     try {
       // 1. Tìm các gateway liên quan đến dự án này
@@ -2102,8 +2182,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 5. Thêm thiết bị mới vào Gateway của Dự án
-  router.post('/customer-projects/:id/devices', async (req, res) => {
+  // 5. Thêm thiết bị mới vào Gateway của Dự án (Yêu cầu đăng nhập)
+  router.post('/customer-projects/:id/devices', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { device_code, device_name, device_type, slave_address, floor, location_name } = req.body;
     try {
@@ -2123,8 +2203,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 6. Xóa thiết bị khỏi database
-  router.delete('/customer-devices/:deviceId', async (req, res) => {
+  // 6. Xóa thiết bị khỏi database (Yêu cầu đăng nhập)
+  router.delete('/customer-devices/:deviceId', authenticateToken, async (req, res) => {
     const { deviceId } = req.params;
     try {
       await pool.query('DELETE FROM devices WHERE device_id = ?', [deviceId]);
@@ -2407,8 +2487,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 2. Thêm mới vật tư
-  router.post('/storage', async (req, res) => {
+  // 2. Thêm mới vật tư (Yêu cầu đăng nhập)
+  router.post('/storage', authenticateToken, async (req, res) => {
     try {
       await ensureStorageTable();
       const { device_code, name, unit, quantity, time, status } = req.body;
@@ -2448,8 +2528,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 3. Sửa thông tin vật tư
-  router.put('/storage/:id', async (req, res) => {
+  // 3. Sửa thông tin vật tư (Yêu cầu đăng nhập)
+  router.put('/storage/:id', authenticateToken, async (req, res) => {
     try {
       await ensureStorageTable();
       const { id } = req.params;
@@ -2497,8 +2577,8 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 4. Xóa vật tư khỏi kho
-  router.delete('/storage/:id', async (req, res) => {
+  // 4. Xóa vật tư khỏi kho (Yêu cầu đăng nhập)
+  router.delete('/storage/:id', authenticateToken, async (req, res) => {
     try {
       await ensureStorageTable();
       const { id } = req.params;

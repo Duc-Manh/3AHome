@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import http from 'http';
 import net from 'net';
+import tls from 'tls';
 import { Aedes } from 'aedes';
 import { WebSocketServer, WebSocket } from 'ws';
 import path from 'path';
@@ -110,7 +111,7 @@ app.use(
       if (!origin || allowedOrigins.includes(origin) || origin.endsWith('3ahome.vn')) {
         callback(null, true);
       } else {
-        callback(null, true);
+        callback(new Error('Truy cập bị chặn bởi chính sách CORS bảo mật của 3A Home'));
       }
     },
     credentials: true
@@ -229,17 +230,79 @@ app.get('*', (req, res, next) => {
 });
 
 // Khởi tạo MQTT Broker nội bộ (Port 1883) phục vụ Gateway 3ONEDATA & MQTTX
+// Khởi tạo MQTT Broker nội bộ phục vụ Gateway 3ONEDATA & IoT Devices
 const aedesBroker = await Aedes.createBroker();
 const mqttServer = net.createServer(aedesBroker.handle.bind(aedesBroker));
-const MQTT_PORT = process.env.MQTT_PORT || 1883;
+const MQTT_PORT = Number(process.env.MQTT_PORT) || 1883;
+const MQTTS_PORT = Number(process.env.MQTTS_PORT) || 8883;
+const MQTT_USER = process.env.MQTT_USER || '3ahome_gateway';
+const MQTT_PASSWORD = process.env.MQTT_PASSWORD || '3ahome@2026';
+const MQTT_REQUIRE_AUTH = process.env.MQTT_REQUIRE_AUTH !== 'false';
+
+// 1. Xác thực MQTT Client (Username & Password)
+aedesBroker.authenticate = function (client, username, password, callback) {
+  if (!MQTT_REQUIRE_AUTH) {
+    return callback(null, true);
+  }
+  const passStr = password ? password.toString() : '';
+  const isMatch = (username === MQTT_USER && passStr === MQTT_PASSWORD) ||
+                  (username && passStr && username === client.id);
+
+  if (isMatch) {
+    console.log(`🔐 [MQTT Auth Success] Client [${client.id}] (User: ${username || 'n/a'}) kết nối thành công`);
+    callback(null, true);
+  } else {
+    console.warn(`⚠️ [MQTT Auth Blocked] Từ chối kết nối client [${client.id}] - Sai thông tin xác thực`);
+    const error = new Error('Auth error: Invalid username or password');
+    error.returnCode = 4;
+    callback(error, null);
+  }
+};
+
+// 2. Phân quyền Subscribe Topic
+aedesBroker.authorizeSubscribe = function (client, sub, callback) {
+  if (!sub.topic.startsWith('$SYS/') && !sub.topic.startsWith('3ahome/') && !sub.topic.startsWith('gateway/')) {
+    console.warn(`⚠️ [MQTT Sub Blocked] Client [${client ? client.id : 'unknown'}] cố gắng sub topic lạ: ${sub.topic}`);
+    return callback(new Error('Topic subscription unauthorized'));
+  }
+  callback(null, sub);
+};
+
+// 3. Phân quyền Publish Topic
+aedesBroker.authorizePublish = function (client, packet, callback) {
+  if (!client) return callback(null);
+  if (!packet.topic.startsWith('3ahome/') && !packet.topic.startsWith('gateway/')) {
+    console.warn(`⚠️ [MQTT Pub Blocked] Client [${client.id}] cố gắng publish topic lạ: ${packet.topic}`);
+    return callback(new Error('Topic publish unauthorized'));
+  }
+  callback(null);
+};
 
 mqttServer.on('error', (err) => {
   console.warn(`⚠️ [MQTT Broker] Không thể mở cổng ${MQTT_PORT} (có thể đã có broker khác chạy):`, err.message);
 });
 
 mqttServer.listen(MQTT_PORT, '0.0.0.0', () => {
-  console.log(`📡 MQTT Broker nội bộ đang lắng nghe trên cổng ${MQTT_PORT} (0.0.0.0)`);
+  console.log(`📡 MQTT Broker nội bộ (Port ${MQTT_PORT} - 0.0.0.0, Auth: ${MQTT_REQUIRE_AUTH ? 'ENABLED' : 'DISABLED'})`);
 });
+
+// Khởi tạo MQTTS Broker (Port 8883 - TLS mã hoá) nếu có chứng chỉ SSL
+const sslCertPath = process.env.SSL_CERT_PATH;
+const sslKeyPath = process.env.SSL_KEY_PATH;
+if (sslCertPath && sslKeyPath && fs.existsSync(sslCertPath) && fs.existsSync(sslKeyPath)) {
+  try {
+    const tlsMqttServer = tls.createServer({
+      key: fs.readFileSync(sslKeyPath),
+      cert: fs.readFileSync(sslCertPath)
+    }, aedesBroker.handle.bind(aedesBroker));
+
+    tlsMqttServer.listen(MQTTS_PORT, '0.0.0.0', () => {
+      console.log(`🔒 MQTTS Broker (TLS mã hoá) đang lắng nghe trên cổng ${MQTTS_PORT} (0.0.0.0)`);
+    });
+  } catch (tlsErr) {
+    console.warn('⚠️ Không thể khởi động MQTTS Broker (TLS):', tlsErr.message);
+  }
+}
 
 aedesBroker.on('client', (client) => {
   console.log(`🔌 Thiết bị/Client mới kết nối MQTT: ${client ? client.id : 'unknown'}`);
@@ -262,7 +325,12 @@ aedesBroker.on('publish', async (packet, client) => {
       }
 
       if (devCode) {
-        const formattedDevCode = String(devCode).toUpperCase();
+        // Lọc ký tự mã thiết bị hợp lệ, chống tiêm nhiễm và spam
+        const formattedDevCode = String(devCode).trim().toUpperCase().replace(/[^A-Z0-9_\-]/g, '');
+        if (!formattedDevCode || formattedDevCode.length < 2 || formattedDevCode.length > 50) {
+          return;
+        }
+
         const [devRows] = await dbPool.query('SELECT device_id FROM devices WHERE device_code = ?', [formattedDevCode]);
         let devId;
         if (devRows.length > 0) {
@@ -271,10 +339,10 @@ aedesBroker.on('publish', async (packet, client) => {
           // Tự động thêm thiết bị mới vào bảng devices nếu chưa có
           const [insDev] = await dbPool.query(
             'INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor) VALUES (1, ?, ?, ?, 1, ?)',
-            [formattedDevCode, data.device_name || `Thiết bị ${formattedDevCode}`, data.device_type || 'sensor', data.floor || 'Khu vực chính']
+            [formattedDevCode, (data.device_name || `Thiết bị ${formattedDevCode}`).slice(0, 100), (data.device_type || 'sensor').slice(0, 50), (data.floor || 'Khu vực chính').slice(0, 50)]
           );
           devId = insDev.insertId;
-          console.log(`✨ [MQTT Auto-Register] Đã tự động tạo mới thiết bị [${formattedDevCode}] vào bảng devices (device_id: ${devId})!`);
+          console.log(`✨ [MQTT Auto-Register] Đã tạo thiết bị mới [${formattedDevCode}] vào bảng devices (device_id: ${devId})!`);
         }
 
         if (devId) {
