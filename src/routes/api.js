@@ -1787,15 +1787,34 @@ export function createApiRouter(broadcastWs) {
 
       await pool.query(`
         CREATE TABLE IF NOT EXISTS telemetry_data (
-          id BIGINT AUTO_INCREMENT PRIMARY KEY,
-          device_id INT NOT NULL,
-          param_name VARCHAR(50) NOT NULL,
-          param_value FLOAT NOT NULL,
-          recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          INDEX idx_device_time (device_id, recorded_at DESC),
+          device_id INT PRIMARY KEY,
+          temperature FLOAT DEFAULT NULL,
+          humidity FLOAT DEFAULT NULL,
+          power FLOAT DEFAULT NULL,
+          voltage FLOAT DEFAULT NULL,
+          current FLOAT DEFAULT NULL,
+          raw_data TEXT DEFAULT NULL,
+          recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
           CONSTRAINT fk_telemetry_device FOREIGN KEY (device_id) REFERENCES devices (device_id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
+
+      // Tự động nâng cấp bảng telemetry_data nếu trước đó tạo theo cấu trúc cũ
+      const columnsToAdd = [
+        "temperature FLOAT DEFAULT NULL",
+        "humidity FLOAT DEFAULT NULL",
+        "power FLOAT DEFAULT NULL",
+        "voltage FLOAT DEFAULT NULL",
+        "current FLOAT DEFAULT NULL",
+        "raw_data TEXT DEFAULT NULL"
+      ];
+      for (const colDef of columnsToAdd) {
+        try {
+          await pool.query(`ALTER TABLE telemetry_data ADD COLUMN ${colDef}`);
+        } catch {
+          // Cột đã tồn tại
+        }
+      }
 
       await pool.query(`
         CREATE TABLE IF NOT EXISTS telemetry_history (
@@ -2209,6 +2228,7 @@ export function createApiRouter(broadcastWs) {
   router.get('/telemetry-data', async (req, res) => {
     const { device_code, location_id, gateway_sn } = req.query;
     try {
+      await ensureIotTables();
       let sql = `
         SELECT 
           t.device_id,
@@ -2259,10 +2279,10 @@ export function createApiRouter(broadcastWs) {
     }
   });
 
-  // 9. Lấy dữ liệu lịch sử viễn trắc từ bảng telemetry_history theo dự án hoặc thiết bị để vẽ biểu đồ
+  // 9. Lấy dữ liệu lịch sử viễn trắc từ bảng telemetry_history theo dự án hoặc thiết bị để vẽ biểu đồ & xem bảng lịch sử
   router.get('/telemetry-history', async (req, res) => {
     try {
-      const { project_name, location_id, device_ids, limit = 500 } = req.query;
+      const { project_name, location_id, device_ids, device_code, search, order = 'ASC', limit = 500 } = req.query;
       let sql = `
         SELECT 
           h.id,
@@ -2272,7 +2292,10 @@ export function createApiRouter(broadcastWs) {
           d.device_type,
           d.floor,
           COALESCE(l.location_name, 'Dự án nội bộ') AS project_name,
+          l.address AS project_address,
           l.location_id,
+          g.gateway_sn,
+          g.ip_address AS gateway_ip,
           h.temperature,
           h.humidity,
           h.power,
@@ -2288,13 +2311,22 @@ export function createApiRouter(broadcastWs) {
         WHERE 1=1
       `;
       const params = [];
-      if (project_name) {
+      if (project_name && project_name !== 'all') {
         sql += ' AND l.location_name = ?';
         params.push(String(project_name));
       }
-      if (location_id) {
+      if (location_id && location_id !== 'all') {
         sql += ' AND l.location_id = ?';
         params.push(Number(location_id));
+      }
+      if (device_code) {
+        sql += ' AND d.device_code = ?';
+        params.push(String(device_code).toUpperCase());
+      }
+      if (search) {
+        sql += ' AND (d.device_code LIKE ? OR d.device_name LIKE ? OR l.location_name LIKE ?)';
+        const sTerm = `%${search}%`;
+        params.push(sTerm, sTerm, sTerm);
       }
       if (device_ids) {
         const idList = String(device_ids).split(',').map(s => Number(s.trim())).filter(n => !isNaN(n));
@@ -2303,8 +2335,9 @@ export function createApiRouter(broadcastWs) {
           params.push(...idList);
         }
       }
-      sql += ' ORDER BY h.recorded_at ASC LIMIT ?';
-      params.push(Number(limit) || 500);
+      const sortDir = String(order).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+      sql += ` ORDER BY h.recorded_at ${sortDir} LIMIT ?`;
+      params.push(Math.min(Number(limit) || 500, 2000));
 
       const [rows] = await pool.query(sql, params);
       res.json({ success: true, count: rows.length, data: rows });
@@ -2327,9 +2360,6 @@ export function createApiRouter(broadcastWs) {
         quantity INT NOT NULL DEFAULT 1,
         \`quantity-out\` INT DEFAULT 0,
         \`quantity-remain\` INT DEFAULT 0,
-        price DECIMAL(15, 2) DEFAULT 0,
-        total DECIMAL(15, 2) DEFAULT 0,
-        invoice VARCHAR(100) DEFAULT '',
         time DATETIME DEFAULT CURRENT_TIMESTAMP,
         \`time-in\` DATETIME NULL,
         \`time-out\` DATETIME NULL,
@@ -2351,8 +2381,17 @@ export function createApiRouter(broadcastWs) {
       if (!colNames.includes('quantity-remain')) {
         await pool.query('ALTER TABLE storage ADD COLUMN `quantity-remain` INT DEFAULT 0');
       }
+      if (colNames.includes('price')) {
+        await pool.query('ALTER TABLE storage DROP COLUMN `price`');
+      }
+      if (colNames.includes('total')) {
+        await pool.query('ALTER TABLE storage DROP COLUMN `total`');
+      }
+      if (colNames.includes('invoice')) {
+        await pool.query('ALTER TABLE storage DROP COLUMN `invoice`');
+      }
     } catch (migrErr) {
-      console.warn('Lỗi kiểm tra cột time-in, time-out, quantity:', migrErr.message);
+      console.warn('Lỗi kiểm tra cột storage:', migrErr.message);
     }
   }
 
@@ -2372,7 +2411,7 @@ export function createApiRouter(broadcastWs) {
   router.post('/storage', async (req, res) => {
     try {
       await ensureStorageTable();
-      const { device_code, name, unit, quantity, price, total, invoice, time, status } = req.body;
+      const { device_code, name, unit, quantity, time, status } = req.body;
       if (!device_code || !name) {
         return res.status(400).json({ success: false, message: 'Vui lòng nhập Mã thiết bị và Tên vật tư' });
       }
@@ -2381,16 +2420,14 @@ export function createApiRouter(broadcastWs) {
       const qtyRemain = req.body['quantity-remain'] !== undefined
         ? Number(req.body['quantity-remain'])
         : (req.body.quantity_remain !== undefined ? Number(req.body.quantity_remain) : Math.max(0, qty - qtyOut));
-      const prc = Number(price) || 0;
-      const tot = total !== undefined && total !== null ? Number(total) : qty * prc;
       const rawTimeIn = req.body['time-in'] || req.body.time_in || time || null;
       const rawTimeOut = req.body['time-out'] || req.body.time_out || null;
       const parsedTimeIn = rawTimeIn ? new Date(rawTimeIn) : new Date();
       const parsedTimeOut = rawTimeOut ? new Date(rawTimeOut) : null;
 
       const [result] = await pool.query(`
-        INSERT INTO storage (device_code, name, unit, quantity, \`quantity-out\`, \`quantity-remain\`, price, total, invoice, time, \`time-in\`, \`time-out\`, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO storage (device_code, name, unit, quantity, \`quantity-out\`, \`quantity-remain\`, time, \`time-in\`, \`time-out\`, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         device_code.trim().toUpperCase(),
         name.trim(),
@@ -2398,9 +2435,6 @@ export function createApiRouter(broadcastWs) {
         qty,
         qtyOut,
         qtyRemain,
-        prc,
-        tot,
-        (invoice || '').trim(),
         parsedTimeIn,
         parsedTimeIn,
         parsedTimeOut,
@@ -2419,14 +2453,12 @@ export function createApiRouter(broadcastWs) {
     try {
       await ensureStorageTable();
       const { id } = req.params;
-      const { device_code, name, unit, quantity, price, total, invoice, status } = req.body;
+      const { device_code, name, unit, quantity, status } = req.body;
       const qty = Number(quantity) || 1;
       const rawQtyOut = req.body['quantity-out'] !== undefined ? req.body['quantity-out'] : req.body.quantity_out;
       const rawQtyRemain = req.body['quantity-remain'] !== undefined ? req.body['quantity-remain'] : req.body.quantity_remain;
       const qtyOut = rawQtyOut !== undefined ? (Number(rawQtyOut) || 0) : 0;
       const qtyRemain = rawQtyRemain !== undefined ? Number(rawQtyRemain) : Math.max(0, qty - qtyOut);
-      const prc = Number(price) || 0;
-      const tot = total !== undefined && total !== null ? Number(total) : qty * prc;
 
       const rawTimeIn = req.body['time-in'] !== undefined ? req.body['time-in'] : req.body.time_in;
       const rawTimeOut = req.body['time-out'] !== undefined ? req.body['time-out'] : req.body.time_out;
@@ -2441,9 +2473,6 @@ export function createApiRouter(broadcastWs) {
           quantity = ?,
           \`quantity-out\` = ?,
           \`quantity-remain\` = ?,
-          price = ?,
-          total = ?,
-          invoice = ?,
           status = ?,
           \`time-in\` = ?,
           \`time-out\` = ?
@@ -2455,9 +2484,6 @@ export function createApiRouter(broadcastWs) {
         qty,
         qtyOut,
         qtyRemain,
-        prc,
-        tot,
-        (invoice || '').trim(),
         (status || 'Tồn kho').trim(),
         parsedTimeIn,
         parsedTimeOut,

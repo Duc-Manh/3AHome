@@ -209,6 +209,17 @@ CREATE TABLE IF NOT EXISTS `telemetry_history` (
   CONSTRAINT `fk_telemetry_hist_device` FOREIGN KEY (`device_id`) REFERENCES `devices` (`device_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-
-
-
+-- 16. Bảng storage: Quản lý vật tư kho (thiết bị, số lượng xuất, tồn kho, thời gian vào/ra)
+CREATE TABLE IF NOT EXISTS `storage` (
+  `id` INT AUTO_INCREMENT PRIMARY KEY,
+  `device_code` VARCHAR(100) NOT NULL,
+  `name` VARCHAR(255) NOT NULL,
+  `unit` VARCHAR(50) DEFAULT 'Cái',
+  `quantity` INT NOT NULL DEFAULT 1,
+  `quantity-out` INT DEFAULT 0,
+  `quantity-remain` INT DEFAULT 0,
+  `time` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  `time-in` DATETIME NULL,
+  `time-out` DATETIME NULL,
+  `status` VARCHAR(50) DEFAULT 'Tồn kho'
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
