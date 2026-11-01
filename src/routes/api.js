@@ -2582,6 +2582,7 @@ export function createApiRouter(broadcastWs) {
         id INT AUTO_INCREMENT PRIMARY KEY,
         device_code VARCHAR(100) NOT NULL,
         name VARCHAR(255) NOT NULL,
+        type VARCHAR(50) DEFAULT 'sensor',
         unit VARCHAR(50) DEFAULT 'Cái',
         quantity INT NOT NULL DEFAULT 1,
         \`quantity-out\` INT DEFAULT 0,
@@ -2595,6 +2596,9 @@ export function createApiRouter(broadcastWs) {
     try {
       const [cols] = await pool.query('SHOW COLUMNS FROM storage');
       const colNames = cols.map((c) => c.Field);
+      if (!colNames.includes('type')) {
+        await pool.query("ALTER TABLE storage ADD COLUMN `type` VARCHAR(50) DEFAULT 'sensor'");
+      }
       if (!colNames.includes('time-in')) {
         await pool.query('ALTER TABLE storage ADD COLUMN `time-in` DATETIME NULL');
       }
@@ -2637,7 +2641,7 @@ export function createApiRouter(broadcastWs) {
   router.post('/storage', authenticateToken, async (req, res) => {
     try {
       await ensureStorageTable();
-      const { device_code, name, unit, quantity, time, status } = req.body;
+      const { device_code, name, type, unit, quantity, time, status } = req.body;
       if (!device_code || !name) {
         return res.status(400).json({ success: false, message: 'Vui lòng nhập Mã thiết bị và Tên vật tư' });
       }
@@ -2652,11 +2656,12 @@ export function createApiRouter(broadcastWs) {
       const parsedTimeOut = rawTimeOut ? new Date(rawTimeOut) : null;
 
       const [result] = await pool.query(`
-        INSERT INTO storage (device_code, name, unit, quantity, \`quantity-out\`, \`quantity-remain\`, time, \`time-in\`, \`time-out\`, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO storage (device_code, name, type, unit, quantity, \`quantity-out\`, \`quantity-remain\`, time, \`time-in\`, \`time-out\`, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         device_code.trim().toUpperCase(),
         name.trim(),
+        (type || 'sensor').trim(),
         (unit || 'Cái').trim(),
         qty,
         qtyOut,
@@ -2679,7 +2684,7 @@ export function createApiRouter(broadcastWs) {
     try {
       await ensureStorageTable();
       const { id } = req.params;
-      const { device_code, name, unit, quantity, status } = req.body;
+      const { device_code, name, type, unit, quantity, status } = req.body;
       const qty = Number(quantity) || 1;
       const rawQtyOut = req.body['quantity-out'] !== undefined ? req.body['quantity-out'] : req.body.quantity_out;
       const rawQtyRemain = req.body['quantity-remain'] !== undefined ? req.body['quantity-remain'] : req.body.quantity_remain;
@@ -2695,6 +2700,7 @@ export function createApiRouter(broadcastWs) {
         UPDATE storage SET
           device_code = ?,
           name = ?,
+          type = ?,
           unit = ?,
           quantity = ?,
           \`quantity-out\` = ?,
@@ -2706,6 +2712,7 @@ export function createApiRouter(broadcastWs) {
       `, [
         device_code.trim().toUpperCase(),
         name.trim(),
+        (type || 'sensor').trim(),
         (unit || 'Cái').trim(),
         qty,
         qtyOut,

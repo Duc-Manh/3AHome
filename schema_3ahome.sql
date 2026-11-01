@@ -214,6 +214,7 @@ CREATE TABLE IF NOT EXISTS `storage` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
   `device_code` VARCHAR(100) NOT NULL,
   `name` VARCHAR(255) NOT NULL,
+  `type` VARCHAR(50) DEFAULT 'sensor',
   `unit` VARCHAR(50) DEFAULT 'Cái',
   `quantity` INT NOT NULL DEFAULT 1,
   `quantity-out` INT DEFAULT 0,
