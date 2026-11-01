@@ -679,6 +679,127 @@ export function createApiRouter(broadcastWs) {
     res.json({ success: true, message: 'Xác thực OTP thành công!' });
   });
 
+  // 6.1. API Xác thực Đăng nhập Google OAuth 2.0 (Google Identity Services)
+  router.post('/auth/google', authLimiter, async (req, res) => {
+    const { accessToken } = req.body;
+    if (!accessToken) {
+      return res.status(400).json({ success: false, message: 'Thiếu mã xác thực Google.' });
+    }
+
+    try {
+      // 1. Lấy thông tin tài khoản người dùng từ Google UserInfo API
+      const googleRes = await fetch(`https://www.googleapis.com/oauth2/v3/userinfo?access_token=${accessToken}`);
+      if (!googleRes.ok) {
+        return res.status(401).json({ success: false, message: 'Mã xác thực Google không hợp lệ hoặc đã hết hạn.' });
+      }
+      const googleUser = await googleRes.json();
+      const email = (googleUser.email || '').trim().toLowerCase();
+
+      if (!email) {
+        return res.status(400).json({ success: false, message: 'Không thể lấy email từ tài khoản Google.' });
+      }
+
+      // 2. Tra cứu trong bảng login (nhân viên / admin)
+      const [staffRows] = await pool.query(
+        'SELECT id, time, full_name, room, position, gmail, phone, authen, state FROM login WHERE LOWER(gmail) = ? LIMIT 1',
+        [email]
+      );
+
+      if (staffRows.length > 0) {
+        const user = staffRows[0];
+        if (user.state && user.state.toLowerCase() === 'inactive') {
+          await recordLoginAudit(email, 'staff', req, 'FAILED', 'Tài khoản Google đang bị khóa');
+          return res.status(403).json({ success: false, message: 'Tài khoản của bạn đang bị khóa.' });
+        }
+
+        const token = jwt.sign(
+          { id: user.id, email: user.gmail, authen: user.authen, role: 'staff' },
+          JWT_SECRET,
+          { expiresIn: '30d' }
+        );
+
+        try {
+          await pool.query('UPDATE login SET last_online = NOW() WHERE id = ?', [user.id]);
+          await recordLoginAudit(user.gmail, 'staff', req, 'SUCCESS', 'Đăng nhập Google (Nhân viên) thành công');
+        } catch {}
+
+        res.cookie('token', token, {
+          path: '/',
+          maxAge: 30 * 24 * 3600 * 1000,
+          sameSite: 'lax',
+          secure: process.env.NODE_ENV === 'production'
+        });
+
+        return res.json({
+          success: true,
+          message: 'Đăng nhập bằng Google thành công',
+          role: 'staff',
+          token: token,
+          user: {
+            id: user.id,
+            full_name: user.full_name || googleUser.name,
+            room: user.room,
+            position: user.position,
+            gmail: user.gmail,
+            phone: user.phone,
+            authen: Number(user.authen),
+            state: user.state
+          }
+        });
+      }
+
+      // 3. Tra cứu trong bảng locations (khách hàng)
+      const [locRows] = await pool.query(
+        'SELECT location_id, location_name, address, customer_name, customer_phone, customer_email, status FROM locations WHERE LOWER(customer_email) = ? LIMIT 1',
+        [email]
+      );
+
+      if (locRows.length > 0) {
+        const loc = locRows[0];
+        const token = jwt.sign(
+          { id: loc.location_id, email: loc.customer_email, role: 'customer' },
+          JWT_SECRET,
+          { expiresIn: '30d' }
+        );
+
+        await recordLoginAudit(loc.customer_email, 'customer', req, 'SUCCESS', 'Đăng nhập Google (Khách hàng) thành công');
+
+        res.cookie('token', token, {
+          path: '/',
+          maxAge: 30 * 24 * 3600 * 1000,
+          sameSite: 'lax',
+          secure: process.env.NODE_ENV === 'production'
+        });
+
+        return res.json({
+          success: true,
+          role: 'customer',
+          message: 'Đăng nhập khách hàng bằng Google thành công',
+          token: token,
+          user: {
+            id: loc.location_id,
+            full_name: loc.customer_name || loc.location_name || googleUser.name,
+            gmail: loc.customer_email,
+            phone: loc.customer_phone,
+            role: 'customer',
+            projectName: loc.location_name,
+            address: loc.address,
+            status: loc.status
+          }
+        });
+      }
+
+      // Nếu email chưa có trong DB
+      await recordLoginAudit(email, 'unknown', req, 'FAILED', 'Email Google chưa được cấp tài khoản');
+      return res.status(403).json({
+        success: false,
+        message: `Email "${email}" chưa được cấp tài khoản trong hệ thống 3A Home. Vui lòng liên hệ Quản trị viên để được cấp quyền truy cập.`
+      });
+    } catch (err) {
+      res.status(500).json({ success: false, message: 'Lỗi xác thực Google: ' + err.message });
+    }
+  });
+
   // 3. API Xác thực JWT Token (Kiểm tra phiên làm việc)
   router.get('/verify-token', (req, res) => {
     const authHeader = req.headers['authorization'];
