@@ -32,15 +32,18 @@ app.set('trust proxy', 1);
 app.disable('x-powered-by');
 
 // Bảo mật: Tự động chuyển hướng toàn bộ HTTP sang HTTPS chuẩn 301
+// Tuân thủ RFC 6797: Tuyệt đối không gửi header Strict-Transport-Security trên kết nối HTTP không bảo mật
 app.use((req, res, next) => {
-  const proto = req.headers['x-forwarded-proto'];
-  if (proto && proto !== 'https') {
-    return res.redirect(301, `https://${req.headers.host}${req.url}`);
+  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https';
+  if (!isHttps && process.env.NODE_ENV === 'production') {
+    res.removeHeader('Strict-Transport-Security');
+    const host = req.headers.host || '3ahome.vn';
+    return res.redirect(301, `https://${host}${req.url}`);
   }
   next();
 });
 
-// Bảo mật: Tích hợp Helmet để thiết lập các HTTP Security Headers chuẩn OWASP & Mozilla Observatory
+// Bảo mật: Tích hợp Helmet để thiết lập các HTTP Security Headers chuẩn OWASP & Mozilla Observatory A+
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -48,16 +51,10 @@ app.use(
         defaultSrc: ["'self'"],
         scriptSrc: [
           "'self'",
-          "'unsafe-inline'",
-          "'unsafe-eval'",
+          'https://accounts.google.com',
           'https://cdnjs.cloudflare.com',
           'https://cdn.jsdelivr.net',
-          'https://*.cloudflare.com',
-          'https://*.cloudflareinsights.com',
-          'https://static.cloudflareinsights.com',
-          'https://*.google.com',
-          'https://*.gstatic.com',
-          'https://accounts.google.com'
+          'https://static.cloudflareinsights.com'
         ],
         styleSrc: [
           "'self'",
@@ -66,14 +63,13 @@ app.use(
           'https://cdnjs.cloudflare.com'
         ],
         fontSrc: ["'self'", 'data:', 'https://fonts.gstatic.com'],
-        imgSrc: ["'self'", 'data:', 'blob:', 'https:', 'http:', 'https://*.googleusercontent.com'],
+        imgSrc: ["'self'", 'data:', 'blob:', 'https:', 'https://*.googleusercontent.com'],
         mediaSrc: ["'self'", 'data:', 'blob:', 'https:'],
         connectSrc: [
           "'self'",
           'ws:',
           'wss:',
           'https:',
-          'http:',
           'https://formsubmit.co',
           'https://*.cloudflareinsights.com',
           'https://accounts.google.com',
