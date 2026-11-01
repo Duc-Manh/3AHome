@@ -56,7 +56,8 @@ app.use(
           'https://*.cloudflareinsights.com',
           'https://static.cloudflareinsights.com',
           'https://*.google.com',
-          'https://*.gstatic.com'
+          'https://*.gstatic.com',
+          'https://accounts.google.com'
         ],
         styleSrc: [
           "'self'",
@@ -65,12 +66,23 @@ app.use(
           'https://cdnjs.cloudflare.com'
         ],
         fontSrc: ["'self'", 'data:', 'https://fonts.gstatic.com'],
-        imgSrc: ["'self'", 'data:', 'blob:', 'https:', 'http:'],
+        imgSrc: ["'self'", 'data:', 'blob:', 'https:', 'http:', 'https://*.googleusercontent.com'],
         mediaSrc: ["'self'", 'data:', 'blob:', 'https:'],
-        connectSrc: ["'self'", 'ws:', 'wss:', 'https:', 'http:', 'https://formsubmit.co', 'https://*.cloudflareinsights.com'],
+        connectSrc: [
+          "'self'",
+          'ws:',
+          'wss:',
+          'https:',
+          'http:',
+          'https://formsubmit.co',
+          'https://*.cloudflareinsights.com',
+          'https://accounts.google.com',
+          'https://www.googleapis.com'
+        ],
         frameSrc: [
           "'self'",
           'https://www.google.com',
+          'https://accounts.google.com',
           'https://maps.google.com',
           'https://www.youtube.com'
         ],
@@ -85,6 +97,7 @@ app.use(
       includeSubDomains: true,
       preload: true
     },
+    crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
     crossOriginResourcePolicy: { policy: 'cross-origin' },
     crossOriginEmbedderPolicy: false
   })
