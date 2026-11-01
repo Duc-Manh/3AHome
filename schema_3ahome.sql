@@ -222,5 +222,5 @@ CREATE TABLE IF NOT EXISTS `storage` (
   `time` DATETIME DEFAULT CURRENT_TIMESTAMP,
   `time_in` DATETIME NULL,
   `time_out` DATETIME NULL,
-  `status` VARCHAR(50) DEFAULT 'Tồn kho'
+  `status` VARCHAR(50) DEFAULT '1'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
