@@ -217,10 +217,10 @@ CREATE TABLE IF NOT EXISTS `storage` (
   `type` VARCHAR(50) DEFAULT 'sensor',
   `unit` VARCHAR(50) DEFAULT 'Cái',
   `quantity` INT NOT NULL DEFAULT 1,
-  `quantity-out` INT DEFAULT 0,
-  `quantity-remain` INT DEFAULT 0,
+  `quantity_out` INT DEFAULT 0,
+  `quantity_remain` INT DEFAULT 0,
   `time` DATETIME DEFAULT CURRENT_TIMESTAMP,
-  `time-in` DATETIME NULL,
-  `time-out` DATETIME NULL,
+  `time_in` DATETIME NULL,
+  `time_out` DATETIME NULL,
   `status` VARCHAR(50) DEFAULT 'Tồn kho'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

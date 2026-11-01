@@ -2585,11 +2585,11 @@ export function createApiRouter(broadcastWs) {
         type VARCHAR(50) DEFAULT 'sensor',
         unit VARCHAR(50) DEFAULT 'Cái',
         quantity INT NOT NULL DEFAULT 1,
-        \`quantity-out\` INT DEFAULT 0,
-        \`quantity-remain\` INT DEFAULT 0,
+        quantity_out INT DEFAULT 0,
+        quantity_remain INT DEFAULT 0,
         time DATETIME DEFAULT CURRENT_TIMESTAMP,
-        \`time-in\` DATETIME NULL,
-        \`time-out\` DATETIME NULL,
+        time_in DATETIME NULL,
+        time_out DATETIME NULL,
         status VARCHAR(50) DEFAULT 'Tồn kho'
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
@@ -2599,17 +2599,26 @@ export function createApiRouter(broadcastWs) {
       if (!colNames.includes('type')) {
         await pool.query("ALTER TABLE storage ADD COLUMN `type` VARCHAR(50) DEFAULT 'sensor'");
       }
-      if (!colNames.includes('time-in')) {
-        await pool.query('ALTER TABLE storage ADD COLUMN `time-in` DATETIME NULL');
+      // Đổi tên cột từ dấu gạch nối sang dấu gạch dưới (chuẩn SQL)
+      if (colNames.includes('time-in')) {
+        await pool.query('ALTER TABLE storage CHANGE COLUMN `time-in` time_in DATETIME NULL');
+      } else if (!colNames.includes('time_in')) {
+        await pool.query('ALTER TABLE storage ADD COLUMN time_in DATETIME NULL');
       }
-      if (!colNames.includes('time-out')) {
-        await pool.query('ALTER TABLE storage ADD COLUMN `time-out` DATETIME NULL');
+      if (colNames.includes('time-out')) {
+        await pool.query('ALTER TABLE storage CHANGE COLUMN `time-out` time_out DATETIME NULL');
+      } else if (!colNames.includes('time_out')) {
+        await pool.query('ALTER TABLE storage ADD COLUMN time_out DATETIME NULL');
       }
-      if (!colNames.includes('quantity-out')) {
-        await pool.query('ALTER TABLE storage ADD COLUMN `quantity-out` INT DEFAULT 0');
+      if (colNames.includes('quantity-out')) {
+        await pool.query('ALTER TABLE storage CHANGE COLUMN `quantity-out` quantity_out INT DEFAULT 0');
+      } else if (!colNames.includes('quantity_out')) {
+        await pool.query('ALTER TABLE storage ADD COLUMN quantity_out INT DEFAULT 0');
       }
-      if (!colNames.includes('quantity-remain')) {
-        await pool.query('ALTER TABLE storage ADD COLUMN `quantity-remain` INT DEFAULT 0');
+      if (colNames.includes('quantity-remain')) {
+        await pool.query('ALTER TABLE storage CHANGE COLUMN `quantity-remain` quantity_remain INT DEFAULT 0');
+      } else if (!colNames.includes('quantity_remain')) {
+        await pool.query('ALTER TABLE storage ADD COLUMN quantity_remain INT DEFAULT 0');
       }
       if (colNames.includes('price')) {
         await pool.query('ALTER TABLE storage DROP COLUMN `price`');
@@ -2629,7 +2638,7 @@ export function createApiRouter(broadcastWs) {
   router.get('/storage', async (req, res) => {
     try {
       await ensureStorageTable();
-      const [rows] = await pool.query('SELECT *, `time-in` AS time_in, `time-out` AS time_out, `quantity-out` AS quantity_out, `quantity-remain` AS quantity_remain FROM storage ORDER BY id DESC');
+      const [rows] = await pool.query('SELECT *, time_in AS `time-in`, time_out AS `time-out`, quantity_out AS `quantity-out`, quantity_remain AS `quantity-remain` FROM storage ORDER BY id DESC');
       res.json({ success: true, data: rows });
     } catch (err) {
       console.error('Lỗi lấy danh sách storage:', err);
@@ -2646,17 +2655,17 @@ export function createApiRouter(broadcastWs) {
         return res.status(400).json({ success: false, message: 'Vui lòng nhập Mã thiết bị và Tên vật tư' });
       }
       const qty = Number(quantity) || 1;
-      const qtyOut = Number(req.body['quantity-out'] !== undefined ? req.body['quantity-out'] : (req.body.quantity_out ?? 0)) || 0;
-      const qtyRemain = req.body['quantity-remain'] !== undefined
-        ? Number(req.body['quantity-remain'])
-        : (req.body.quantity_remain !== undefined ? Number(req.body.quantity_remain) : Math.max(0, qty - qtyOut));
-      const rawTimeIn = req.body['time-in'] || req.body.time_in || time || null;
-      const rawTimeOut = req.body['time-out'] || req.body.time_out || null;
+      const qtyOut = Number(req.body.quantity_out !== undefined ? req.body.quantity_out : (req.body['quantity-out'] ?? 0)) || 0;
+      const qtyRemain = req.body.quantity_remain !== undefined
+        ? Number(req.body.quantity_remain)
+        : (req.body['quantity-remain'] !== undefined ? Number(req.body['quantity-remain']) : Math.max(0, qty - qtyOut));
+      const rawTimeIn = req.body.time_in || req.body['time-in'] || time || null;
+      const rawTimeOut = req.body.time_out || req.body['time-out'] || null;
       const parsedTimeIn = rawTimeIn ? new Date(rawTimeIn) : new Date();
       const parsedTimeOut = rawTimeOut ? new Date(rawTimeOut) : null;
 
       const [result] = await pool.query(`
-        INSERT INTO storage (device_code, name, type, unit, quantity, \`quantity-out\`, \`quantity-remain\`, time, \`time-in\`, \`time-out\`, status)
+        INSERT INTO storage (device_code, name, type, unit, quantity, quantity_out, quantity_remain, time, time_in, time_out, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         device_code.trim().toUpperCase(),
@@ -2686,13 +2695,13 @@ export function createApiRouter(broadcastWs) {
       const { id } = req.params;
       const { device_code, name, type, unit, quantity, status } = req.body;
       const qty = Number(quantity) || 1;
-      const rawQtyOut = req.body['quantity-out'] !== undefined ? req.body['quantity-out'] : req.body.quantity_out;
-      const rawQtyRemain = req.body['quantity-remain'] !== undefined ? req.body['quantity-remain'] : req.body.quantity_remain;
+      const rawQtyOut = req.body.quantity_out !== undefined ? req.body.quantity_out : req.body['quantity-out'];
+      const rawQtyRemain = req.body.quantity_remain !== undefined ? req.body.quantity_remain : req.body['quantity-remain'];
       const qtyOut = rawQtyOut !== undefined ? (Number(rawQtyOut) || 0) : 0;
       const qtyRemain = rawQtyRemain !== undefined ? Number(rawQtyRemain) : Math.max(0, qty - qtyOut);
 
-      const rawTimeIn = req.body['time-in'] !== undefined ? req.body['time-in'] : req.body.time_in;
-      const rawTimeOut = req.body['time-out'] !== undefined ? req.body['time-out'] : req.body.time_out;
+      const rawTimeIn = req.body.time_in !== undefined ? req.body.time_in : req.body['time-in'];
+      const rawTimeOut = req.body.time_out !== undefined ? req.body.time_out : req.body['time-out'];
       const parsedTimeIn = rawTimeIn ? new Date(rawTimeIn) : null;
       const parsedTimeOut = rawTimeOut ? new Date(rawTimeOut) : null;
 
@@ -2703,11 +2712,11 @@ export function createApiRouter(broadcastWs) {
           type = ?,
           unit = ?,
           quantity = ?,
-          \`quantity-out\` = ?,
-          \`quantity-remain\` = ?,
+          quantity_out = ?,
+          quantity_remain = ?,
           status = ?,
-          \`time-in\` = ?,
-          \`time-out\` = ?
+          time_in = ?,
+          time_out = ?
         WHERE id = ?
       `, [
         device_code.trim().toUpperCase(),
