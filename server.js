@@ -287,8 +287,11 @@ mqttServer.listen(MQTT_PORT, '0.0.0.0', () => {
 });
 
 // Khởi tạo MQTTS Broker (Port 8883 - TLS mã hoá) nếu có chứng chỉ SSL
-const sslCertPath = process.env.SSL_CERT_PATH;
-const sslKeyPath = process.env.SSL_KEY_PATH;
+const defaultCertPath = path.resolve(__dirname, 'certs/fullchain.pem');
+const defaultKeyPath = path.resolve(__dirname, 'certs/privkey.pem');
+const sslCertPath = process.env.SSL_CERT_PATH || (fs.existsSync(defaultCertPath) ? defaultCertPath : null);
+const sslKeyPath = process.env.SSL_KEY_PATH || (fs.existsSync(defaultKeyPath) ? defaultKeyPath : null);
+
 if (sslCertPath && sslKeyPath && fs.existsSync(sslCertPath) && fs.existsSync(sslKeyPath)) {
   try {
     const tlsMqttServer = tls.createServer({
