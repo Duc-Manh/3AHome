@@ -321,9 +321,34 @@ export function createApiRouter(broadcastWs) {
     legacyHeaders: false,
   });
 
+  // 7. Tự động khởi tạo bảng login_logs phục vụ giám sát an ninh
+  let isLoginLogsTableReady = false;
+  async function ensureLoginLogsTable() {
+    if (isLoginLogsTableReady) return;
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS login_logs (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          email VARCHAR(150) NOT NULL,
+          role VARCHAR(50) DEFAULT 'staff',
+          ip_address VARCHAR(100) DEFAULT NULL,
+          user_agent VARCHAR(255) DEFAULT NULL,
+          status VARCHAR(50) DEFAULT 'SUCCESS',
+          reason VARCHAR(255) DEFAULT '',
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `);
+      isLoginLogsTableReady = true;
+    } catch (err) {
+      console.warn('Lỗi kiểm tra bảng login_logs:', err.message);
+    }
+  }
+  ensureLoginLogsTable();
+
   // 7. Ghi Audit Log Lịch sử đăng nhập vào bảng login_logs
   async function recordLoginAudit(email, role, req, status, reason = '') {
     try {
+      await ensureLoginLogsTable();
       const ip = req.headers['x-forwarded-for'] || req.socket?.remoteAddress || req.ip || '';
       const userAgent = req.headers['user-agent'] || '';
       await pool.query(
