@@ -2247,6 +2247,17 @@ export function createApiRouter(broadcastWs) {
             ON DUPLICATE KEY UPDATE device_name = VALUES(device_name), slave_address = VALUES(slave_address), floor = VALUES(floor)
           `, [gatewayId, dev.device_code.toUpperCase(), dev.device_name, dev.device_type || 'sensor', Number(dev.slave_address) || 1, dev.location_name || dev.floor || 'Khu vực chính']);
         }
+        // Tự động cập nhật quantity_out, quantity_remain, status trong bảng storage
+        await pool.query(`
+          UPDATE storage s
+          SET 
+            s.quantity_out = (SELECT COUNT(*) FROM devices d WHERE UPPER(TRIM(d.device_code)) = UPPER(TRIM(s.device_code))),
+            s.quantity_remain = GREATEST(0, s.quantity - (SELECT COUNT(*) FROM devices d WHERE UPPER(TRIM(d.device_code)) = UPPER(TRIM(s.device_code)))),
+            s.status = CASE 
+              WHEN (s.quantity - (SELECT COUNT(*) FROM devices d WHERE UPPER(TRIM(d.device_code)) = UPPER(TRIM(s.device_code)))) > 0 THEN '1' 
+              ELSE '2' 
+            END
+        `);
       }
 
       // Gửi email thông tin tài khoản đăng nhập cho khách hàng nếu có email hợp lệ
@@ -2638,6 +2649,16 @@ export function createApiRouter(broadcastWs) {
   router.get('/storage', async (req, res) => {
     try {
       await ensureStorageTable();
+      await pool.query(`
+        UPDATE storage s
+        SET 
+          s.quantity_out = (SELECT COUNT(*) FROM devices d WHERE UPPER(TRIM(d.device_code)) = UPPER(TRIM(s.device_code))),
+          s.quantity_remain = GREATEST(0, s.quantity - (SELECT COUNT(*) FROM devices d WHERE UPPER(TRIM(d.device_code)) = UPPER(TRIM(s.device_code)))),
+          s.status = CASE 
+            WHEN (s.quantity - (SELECT COUNT(*) FROM devices d WHERE UPPER(TRIM(d.device_code)) = UPPER(TRIM(s.device_code)))) > 0 THEN '1' 
+            ELSE '2' 
+          END
+      `);
       const [rows] = await pool.query('SELECT *, time_in AS `time-in`, time_out AS `time-out`, quantity_out AS `quantity-out`, quantity_remain AS `quantity-remain` FROM storage ORDER BY id DESC');
       res.json({ success: true, data: rows });
     } catch (err) {
@@ -2650,28 +2671,30 @@ export function createApiRouter(broadcastWs) {
   router.post('/storage', authenticateToken, async (req, res) => {
     try {
       await ensureStorageTable();
-      const { device_code, name, type, unit, quantity, time, status } = req.body;
+      const { device_code, name, type, unit, quantity, time } = req.body;
       if (!device_code || !name) {
         return res.status(400).json({ success: false, message: 'Vui lòng nhập Mã thiết bị và Tên vật tư' });
       }
+      const devCode = device_code.trim().toUpperCase();
+      const [devCountRows] = await pool.query(
+        'SELECT COUNT(*) AS cnt FROM devices WHERE UPPER(TRIM(device_code)) = ?',
+        [devCode]
+      );
+      const qtyOut = Number(devCountRows[0]?.cnt || 0);
       const qty = Number(quantity) || 1;
-      const qtyOut = Number(req.body.quantity_out !== undefined ? req.body.quantity_out : (req.body['quantity-out'] ?? 0)) || 0;
-      const qtyRemain = req.body.quantity_remain !== undefined
-        ? Number(req.body.quantity_remain)
-        : (req.body['quantity-remain'] !== undefined ? Number(req.body['quantity-remain']) : Math.max(0, qty - qtyOut));
+      const qtyRemain = Math.max(0, qty - qtyOut);
+      const statusVal = qtyRemain > 0 ? '1' : '2';
+
       const rawTimeIn = req.body.time_in || req.body['time-in'] || time || null;
       const rawTimeOut = req.body.time_out || req.body['time-out'] || null;
       const parsedTimeIn = rawTimeIn ? new Date(rawTimeIn) : new Date();
       const parsedTimeOut = rawTimeOut ? new Date(rawTimeOut) : null;
 
-      const rawStatus = String(status || '1').trim();
-      const statusVal = (rawStatus === '2' || rawStatus === 'Tại dự án' || rawStatus === 'Đang sử dụng') ? '2' : '1';
-
       const [result] = await pool.query(`
         INSERT INTO storage (device_code, name, type, unit, quantity, quantity_out, quantity_remain, time, time_in, time_out, status)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
-        device_code.trim().toUpperCase(),
+        devCode,
         name.trim(),
         (type || 'sensor').trim(),
         (unit || 'Cái').trim(),
@@ -2696,20 +2719,21 @@ export function createApiRouter(broadcastWs) {
     try {
       await ensureStorageTable();
       const { id } = req.params;
-      const { device_code, name, type, unit, quantity, status } = req.body;
+      const { device_code, name, type, unit, quantity } = req.body;
+      const devCode = device_code.trim().toUpperCase();
+      const [devCountRows] = await pool.query(
+        'SELECT COUNT(*) AS cnt FROM devices WHERE UPPER(TRIM(device_code)) = ?',
+        [devCode]
+      );
+      const qtyOut = Number(devCountRows[0]?.cnt || 0);
       const qty = Number(quantity) || 1;
-      const rawQtyOut = req.body.quantity_out !== undefined ? req.body.quantity_out : req.body['quantity-out'];
-      const rawQtyRemain = req.body.quantity_remain !== undefined ? req.body.quantity_remain : req.body['quantity-remain'];
-      const qtyOut = rawQtyOut !== undefined ? (Number(rawQtyOut) || 0) : 0;
-      const qtyRemain = rawQtyRemain !== undefined ? Number(rawQtyRemain) : Math.max(0, qty - qtyOut);
+      const qtyRemain = Math.max(0, qty - qtyOut);
+      const statusVal = qtyRemain > 0 ? '1' : '2';
 
       const rawTimeIn = req.body.time_in !== undefined ? req.body.time_in : req.body['time-in'];
       const rawTimeOut = req.body.time_out !== undefined ? req.body.time_out : req.body['time-out'];
       const parsedTimeIn = rawTimeIn ? new Date(rawTimeIn) : null;
       const parsedTimeOut = rawTimeOut ? new Date(rawTimeOut) : null;
-
-      const rawStatus = String(status || '1').trim();
-      const statusVal = (rawStatus === '2' || rawStatus === 'Tại dự án' || rawStatus === 'Đang sử dụng') ? '2' : '1';
 
       await pool.query(`
         UPDATE storage SET
@@ -2725,7 +2749,7 @@ export function createApiRouter(broadcastWs) {
           time_out = ?
         WHERE id = ?
       `, [
-        device_code.trim().toUpperCase(),
+        devCode,
         name.trim(),
         (type || 'sensor').trim(),
         (unit || 'Cái').trim(),
