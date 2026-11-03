@@ -388,39 +388,33 @@ aedesBroker.on('publish', async (packet, client) => {
           const showJsonStr = JSON.stringify(showObj);
           const rawJsonStr = JSON.stringify(rawPayload);
 
-          await dbPool.query(`
-            INSERT INTO telemetry_data (device_id, \`show\`, raw_data, recorded_at)
-            VALUES (?, ?, ?, NOW())
-            ON DUPLICATE KEY UPDATE
-              \`show\` = COALESCE(VALUES(\`show\`), \`show\`),
-              raw_data = COALESCE(VALUES(raw_data), raw_data),
-              recorded_at = NOW()
+          let existingNote = null;
+          try {
+            const [prevRows] = await dbPool.query(
+              'SELECT note FROM telemetry_data WHERE device_id = ? AND note IS NOT NULL AND note != "" ORDER BY id DESC LIMIT 1',
+              [devId]
+            );
+            if (prevRows.length > 0) {
+              existingNote = prevRows[0].note;
+            }
+          } catch {
+            // ignore
+          }
+
+          const [insRes] = await dbPool.query(`
+            INSERT INTO telemetry_data (device_id, \`show\`, raw_data, note, recorded_at)
+            VALUES (?, ?, ?, ?, NOW())
           `, [
             devId,
             showJsonStr,
-            rawJsonStr
+            rawJsonStr,
+            existingNote
           ]);
-
-          // Lưu vào bảng telemetry_history để tích luỹ dữ liệu lịch sử
-          let insertedHistoryId = null;
-          try {
-            const [histRes] = await dbPool.query(`
-              INSERT INTO telemetry_history (device_id, \`show\`, raw_data, recorded_at)
-              VALUES (?, ?, ?, NOW())
-            `, [
-              devId,
-              showJsonStr,
-              rawJsonStr
-            ]);
-            insertedHistoryId = histRes.insertId;
-          } catch (histErr) {
-            console.warn('⚠️ Lỗi lưu telemetry_history:', histErr.message);
-          }
 
           console.log(`✅ [MQTT -> MySQL] Đã cập nhật cho thiết bị [${formattedDevCode}] (device_id: ${devId}) - show: ${showJsonStr}`);
           broadcastWs({
             type: 'TELEMETRY_DATA_SAVED',
-            id: insertedHistoryId || Date.now(),
+            id: insRes.insertId || Date.now(),
             device_id: devId,
             device_code: formattedDevCode,
             show: showObj,

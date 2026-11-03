@@ -2013,18 +2013,37 @@ export function createApiRouter(broadcastWs) {
 
       await pool.query(`
         CREATE TABLE IF NOT EXISTS telemetry_data (
-          device_id INT PRIMARY KEY,
+          id BIGINT AUTO_INCREMENT PRIMARY KEY,
+          device_id INT NOT NULL,
           \`show\` TEXT DEFAULT NULL,
           raw_data TEXT DEFAULT NULL,
-          recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          note TEXT DEFAULT NULL,
+          recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          INDEX idx_telemetry_dev_time (device_id, recorded_at),
+          INDEX idx_telemetry_time (recorded_at),
           CONSTRAINT fk_telemetry_device FOREIGN KEY (device_id) REFERENCES devices (device_id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
-      // Tự động nâng cấp bảng telemetry_data: thêm cột `show`, raw_data và xoá các cột cũ temperature, humidity, power, voltage, current
+      // Tự động nâng cấp bảng telemetry_data: thêm cột id (nếu chưa có), `show`, raw_data, note và xoá các cột cũ temperature, humidity, power, voltage, current
+      try {
+        const [tdCols] = await pool.query('SHOW COLUMNS FROM telemetry_data');
+        const tdColNames = tdCols.map((c) => c.Field);
+        if (!tdColNames.includes('id')) {
+          try { await pool.query('ALTER TABLE telemetry_data DROP FOREIGN KEY fk_telemetry_device'); } catch { /* ignore */ }
+          try { await pool.query('ALTER TABLE telemetry_data DROP PRIMARY KEY'); } catch { /* ignore */ }
+          try { await pool.query('ALTER TABLE telemetry_data ADD COLUMN id BIGINT AUTO_INCREMENT PRIMARY KEY FIRST'); } catch { /* ignore */ }
+          try { await pool.query('ALTER TABLE telemetry_data ADD INDEX idx_telemetry_dev_time (device_id, recorded_at)'); } catch { /* ignore */ }
+          try { await pool.query('ALTER TABLE telemetry_data ADD CONSTRAINT fk_telemetry_device FOREIGN KEY (device_id) REFERENCES devices (device_id) ON DELETE CASCADE'); } catch { /* ignore */ }
+        }
+      } catch {
+        // ignore
+      }
+
       const dataColsToAdd = [
         "`show` TEXT DEFAULT NULL",
-        "raw_data TEXT DEFAULT NULL"
+        "raw_data TEXT DEFAULT NULL",
+        "note TEXT DEFAULT NULL"
       ];
       for (const colDef of dataColsToAdd) {
         try {
@@ -2042,33 +2061,22 @@ export function createApiRouter(broadcastWs) {
         }
       }
 
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS telemetry_history (
-          id BIGINT AUTO_INCREMENT PRIMARY KEY,
-          device_id INT NOT NULL,
-          \`show\` TEXT DEFAULT NULL,
-          raw_data TEXT DEFAULT NULL,
-          recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          INDEX idx_telemetry_hist_dev_time (device_id, recorded_at),
-          INDEX idx_telemetry_hist_time (recorded_at),
-          CONSTRAINT fk_telemetry_hist_device FOREIGN KEY (device_id) REFERENCES devices (device_id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-      `);
-
-      // Tự động nâng cấp bảng telemetry_history: thêm cột `show`, raw_data và xoá các cột cũ temperature, humidity, power, voltage, current
-      for (const colDef of dataColsToAdd) {
-        try {
-          await pool.query(`ALTER TABLE telemetry_history ADD COLUMN ${colDef}`);
-        } catch {
-          // Cột đã tồn tại
+      // Chuyển dữ liệu (nếu có) từ bảng telemetry_history sang telemetry_data rồi xoá bảng telemetry_history
+      try {
+        const [thTables] = await pool.query("SHOW TABLES LIKE 'telemetry_history'");
+        if (thTables.length > 0) {
+          try {
+            await pool.query(`
+              INSERT INTO telemetry_data (device_id, \`show\`, raw_data, recorded_at)
+              SELECT device_id, \`show\`, raw_data, recorded_at FROM telemetry_history
+            `);
+          } catch {
+            // ignore
+          }
+          await pool.query('DROP TABLE IF EXISTS telemetry_history');
         }
-      }
-      for (const colName of oldColsToDrop) {
-        try {
-          await pool.query(`ALTER TABLE telemetry_history DROP COLUMN \`${colName}\``);
-        } catch {
-          // Cột đã được xoá
-        }
+      } catch {
+        // ignore
       }
 
       // Nếu bảng locations rỗng, nạp dữ liệu mẫu ban đầu để hệ thống có dữ liệu hiển thị ngay
@@ -2429,40 +2437,35 @@ export function createApiRouter(broadcastWs) {
       const showJsonStr = JSON.stringify(showObj);
       const rawJsonStr = JSON.stringify(rawPayload);
 
-      await pool.query(`
-        INSERT INTO telemetry_data (device_id, \`show\`, raw_data, recorded_at)
-        VALUES (?, ?, ?, NOW())
-        ON DUPLICATE KEY UPDATE
-          \`show\` = COALESCE(VALUES(\`show\`), \`show\`),
-          raw_data = COALESCE(VALUES(raw_data), raw_data),
-          recorded_at = NOW()
+      // Giữ lại giá trị note gần nhất của thiết bị nếu đã có
+      let existingNote = null;
+      try {
+        const [prevRows] = await pool.query(
+          'SELECT note FROM telemetry_data WHERE device_id = ? AND note IS NOT NULL AND note != "" ORDER BY id DESC LIMIT 1',
+          [targetDeviceId]
+        );
+        if (prevRows.length > 0) {
+          existingNote = prevRows[0].note;
+        }
+      } catch {
+        // ignore
+      }
+
+      const [insRes] = await pool.query(`
+        INSERT INTO telemetry_data (device_id, \`show\`, raw_data, note, recorded_at)
+        VALUES (?, ?, ?, ?, NOW())
       `, [
         targetDeviceId,
         showJsonStr,
-        rawJsonStr
+        rawJsonStr,
+        existingNote
       ]);
-
-      // Lưu vào bảng telemetry_history để tích luỹ dữ liệu lịch sử
-      let insertedHistoryId = null;
-      try {
-        const [histRes] = await pool.query(`
-          INSERT INTO telemetry_history (device_id, \`show\`, raw_data, recorded_at)
-          VALUES (?, ?, ?, NOW())
-        `, [
-          targetDeviceId,
-          showJsonStr,
-          rawJsonStr
-        ]);
-        insertedHistoryId = histRes.insertId;
-      } catch (histErr) {
-        console.warn('⚠️ Lỗi lưu telemetry_history:', histErr.message);
-      }
 
       const nowIso = new Date().toISOString();
       if (broadcastWs) {
         broadcastWs({
           type: 'TELEMETRY_DATA_SAVED',
-          id: insertedHistoryId || Date.now(),
+          id: insRes.insertId || Date.now(),
           device_id: targetDeviceId,
           device_code: device_code ? String(device_code).toUpperCase() : `DEV_${targetDeviceId}`,
           show: showObj,
@@ -2472,19 +2475,20 @@ export function createApiRouter(broadcastWs) {
         });
       }
 
-      res.json({ success: true, message: 'Đã cập nhật 1 hàng số liệu đo đạc vào bảng telemetry_data thành công', device_id: targetDeviceId, show: showObj, raw_data: rawPayload });
+      res.json({ success: true, message: 'Đã lưu số liệu đo đạc vào bảng telemetry_data thành công', device_id: targetDeviceId, show: showObj, raw_data: rawPayload });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }
   });
 
-  // 8. Lấy danh sách số liệu đo mới nhất từ bảng telemetry_data (JOIN với devices, gateways, locations)
+  // 8. Lấy danh sách số liệu đo từ bảng telemetry_data (JOIN với devices, gateways, locations)
   router.get('/telemetry-data', async (req, res) => {
-    const { device_code, location_id, gateway_sn } = req.query;
+    const { device_code, location_id, gateway_sn, project_name, device_ids, search, order = 'DESC', limit = 500 } = req.query;
     try {
       await ensureIotTables();
       let sql = `
         SELECT 
+          t.id,
           t.device_id,
           d.device_code,
           d.device_name,
@@ -2500,59 +2504,11 @@ export function createApiRouter(broadcastWs) {
           l.address AS project_address,
           t.\`show\`,
           t.raw_data,
-          DATE_FORMAT(t.recorded_at, '%Y-%m-%d %H:%i:%s') AS recorded_at
+          t.note,
+          DATE_FORMAT(t.recorded_at, '%Y-%m-%d %H:%i:%s') AS recorded_at,
+          DATE_FORMAT(t.recorded_at, '%H:%i %d/%m') AS time_label
         FROM telemetry_data t
         JOIN devices d ON t.device_id = d.device_id
-        LEFT JOIN gateways g ON d.gateway_id = g.gateway_id
-        LEFT JOIN locations l ON g.location_id = l.location_id
-        WHERE 1=1
-      `;
-      const params = [];
-      if (device_code) {
-        sql += ' AND d.device_code = ?';
-        params.push(String(device_code).toUpperCase());
-      }
-      if (location_id) {
-        sql += ' AND l.location_id = ?';
-        params.push(Number(location_id));
-      }
-      if (gateway_sn) {
-        sql += ' AND g.gateway_sn = ?';
-        params.push(String(gateway_sn));
-      }
-      sql += ' ORDER BY t.recorded_at DESC';
-
-      const [rows] = await pool.query(sql, params);
-      res.json({ success: true, count: rows.length, data: rows });
-    } catch (err) {
-      res.status(500).json({ success: false, message: err.message });
-    }
-  });
-
-  // 9. Lấy dữ liệu lịch sử viễn trắc từ bảng telemetry_history theo dự án hoặc thiết bị để vẽ biểu đồ & xem bảng lịch sử
-  router.get('/telemetry-history', async (req, res) => {
-    try {
-      await ensureIotTables();
-      const { project_name, location_id, device_ids, device_code, search, order = 'ASC', limit = 500 } = req.query;
-      let sql = `
-        SELECT 
-          h.id,
-          h.device_id,
-          d.device_code,
-          d.device_name,
-          d.device_type,
-          d.floor,
-          COALESCE(l.location_name, 'Dự án nội bộ') AS project_name,
-          l.address AS project_address,
-          l.location_id,
-          g.gateway_sn,
-          g.ip_address AS gateway_ip,
-          h.\`show\`,
-          h.raw_data,
-          DATE_FORMAT(h.recorded_at, '%Y-%m-%d %H:%i:%s') AS recorded_at,
-          DATE_FORMAT(h.recorded_at, '%H:%i %d/%m') AS time_label
-        FROM telemetry_history h
-        JOIN devices d ON h.device_id = d.device_id
         LEFT JOIN gateways g ON d.gateway_id = g.gateway_id
         LEFT JOIN locations l ON g.location_id = l.location_id
         WHERE 1=1
@@ -2570,6 +2526,10 @@ export function createApiRouter(broadcastWs) {
         sql += ' AND d.device_code = ?';
         params.push(String(device_code).toUpperCase());
       }
+      if (gateway_sn) {
+        sql += ' AND g.gateway_sn = ?';
+        params.push(String(gateway_sn));
+      }
       if (search) {
         sql += ' AND (d.device_code LIKE ? OR d.device_name LIKE ? OR l.location_name LIKE ?)';
         const sTerm = `%${search}%`;
@@ -2578,18 +2538,45 @@ export function createApiRouter(broadcastWs) {
       if (device_ids) {
         const idList = String(device_ids).split(',').map(s => Number(s.trim())).filter(n => !isNaN(n));
         if (idList.length > 0) {
-          sql += ` AND h.device_id IN (${idList.map(() => '?').join(',')})`;
+          sql += ` AND t.device_id IN (${idList.map(() => '?').join(',')})`;
           params.push(...idList);
         }
       }
-      const sortDir = String(order).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
-      sql += ` ORDER BY h.recorded_at ${sortDir}, h.id ${sortDir} LIMIT ?`;
+      const sortDir = String(order).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+      sql += ` ORDER BY t.recorded_at ${sortDir}, t.id ${sortDir} LIMIT ?`;
       params.push(Math.min(Number(limit) || 500, 2000));
 
       const [rows] = await pool.query(sql, params);
       res.json({ success: true, count: rows.length, data: rows });
     } catch (err) {
-      console.error('Lỗi truy vấn telemetry-history:', err);
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 8.1. Cập nhật cột note trong bảng telemetry_data theo device_id
+  router.put('/telemetry-data/:deviceId/note', async (req, res) => {
+    const { deviceId } = req.params;
+    const { note } = req.body;
+    try {
+      await ensureIotTables();
+      await pool.query('UPDATE telemetry_data SET note = ? WHERE device_id = ?', [
+        note !== undefined && note !== null ? String(note) : null,
+        Number(deviceId)
+      ]);
+      res.json({ success: true, message: 'Đã lưu ghi chú vào bảng telemetry_data thành công', device_id: Number(deviceId), note });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 8.2. Xoá hàng dữ liệu trong bảng telemetry_data theo device_id
+  router.delete('/telemetry-data/:deviceId', async (req, res) => {
+    const { deviceId } = req.params;
+    try {
+      await ensureIotTables();
+      await pool.query('DELETE FROM telemetry_data WHERE device_id = ?', [Number(deviceId)]);
+      res.json({ success: true, message: 'Đã xoá hàng tương ứng trong bảng telemetry_data thành công', device_id: Number(deviceId) });
+    } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }
   });

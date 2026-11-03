@@ -180,36 +180,20 @@ CREATE TABLE IF NOT EXISTS `devices` (
   CONSTRAINT `fk_devices_gateway` FOREIGN KEY (`gateway_id`) REFERENCES `gateways` (`gateway_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 14. Bảng telemetry_data: Lưu viễn trắc thông số đo đạc thời gian thực (1 hàng cho mỗi thiết bị)
+-- 14. Bảng telemetry_data: Lưu dữ liệu viễn trắc của thiết bị IoT
 CREATE TABLE IF NOT EXISTS `telemetry_data` (
-  `device_id` INT PRIMARY KEY,
-  `temperature` FLOAT DEFAULT NULL,
-  `humidity` FLOAT DEFAULT NULL,
-  `power` FLOAT DEFAULT NULL,
-  `voltage` FLOAT DEFAULT NULL,
-  `current` FLOAT DEFAULT NULL,
+  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
+  `device_id` INT NOT NULL,
+  `show` TEXT DEFAULT NULL,
   `raw_data` TEXT DEFAULT NULL,
-  `recorded_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `note` TEXT DEFAULT NULL,
+  `recorded_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
+  INDEX `idx_telemetry_dev_time` (`device_id`, `recorded_at`),
+  INDEX `idx_telemetry_time` (`recorded_at`),
   CONSTRAINT `fk_telemetry_device` FOREIGN KEY (`device_id`) REFERENCES `devices` (`device_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 15. Bảng telemetry_history: Lưu lịch sử thông số đo đạc theo chu kỳ thời gian (để vẽ biểu đồ tuần/tháng/năm)
-CREATE TABLE IF NOT EXISTS `telemetry_history` (
-  `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
-  `device_id` INT NOT NULL,
-  `temperature` FLOAT DEFAULT NULL,
-  `humidity` FLOAT DEFAULT NULL,
-  `power` FLOAT DEFAULT NULL,
-  `voltage` FLOAT DEFAULT NULL,
-  `current` FLOAT DEFAULT NULL,
-  `raw_data` TEXT DEFAULT NULL,
-  `recorded_at` DATETIME DEFAULT CURRENT_TIMESTAMP,
-  INDEX `idx_telemetry_hist_dev_time` (`device_id`, `recorded_at`),
-  INDEX `idx_telemetry_hist_time` (`recorded_at`),
-  CONSTRAINT `fk_telemetry_hist_device` FOREIGN KEY (`device_id`) REFERENCES `devices` (`device_id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- 16. Bảng storage: Quản lý vật tư kho (thiết bị, số lượng xuất, tồn kho, thời gian vào/ra)
+-- 15. Bảng storage: Quản lý vật tư kho (thiết bị, số lượng xuất, tồn kho, thời gian vào/ra)
 CREATE TABLE IF NOT EXISTS `storage` (
   `id` INT AUTO_INCREMENT PRIMARY KEY,
   `device_code` VARCHAR(100) NOT NULL,
