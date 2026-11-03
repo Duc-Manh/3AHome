@@ -2014,31 +2014,31 @@ export function createApiRouter(broadcastWs) {
       await pool.query(`
         CREATE TABLE IF NOT EXISTS telemetry_data (
           device_id INT PRIMARY KEY,
-          temperature FLOAT DEFAULT NULL,
-          humidity FLOAT DEFAULT NULL,
-          power FLOAT DEFAULT NULL,
-          voltage FLOAT DEFAULT NULL,
-          current FLOAT DEFAULT NULL,
+          \`show\` TEXT DEFAULT NULL,
           raw_data TEXT DEFAULT NULL,
           recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
           CONSTRAINT fk_telemetry_device FOREIGN KEY (device_id) REFERENCES devices (device_id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
-      // Tự động nâng cấp bảng telemetry_data nếu trước đó tạo theo cấu trúc cũ
-      const columnsToAdd = [
-        "temperature FLOAT DEFAULT NULL",
-        "humidity FLOAT DEFAULT NULL",
-        "power FLOAT DEFAULT NULL",
-        "voltage FLOAT DEFAULT NULL",
-        "current FLOAT DEFAULT NULL",
+      // Tự động nâng cấp bảng telemetry_data: thêm cột `show`, raw_data và xoá các cột cũ temperature, humidity, power, voltage, current
+      const dataColsToAdd = [
+        "`show` TEXT DEFAULT NULL",
         "raw_data TEXT DEFAULT NULL"
       ];
-      for (const colDef of columnsToAdd) {
+      for (const colDef of dataColsToAdd) {
         try {
           await pool.query(`ALTER TABLE telemetry_data ADD COLUMN ${colDef}`);
         } catch {
           // Cột đã tồn tại
+        }
+      }
+      const oldColsToDrop = ['temperature', 'humidity', 'power', 'voltage', 'current'];
+      for (const colName of oldColsToDrop) {
+        try {
+          await pool.query(`ALTER TABLE telemetry_data DROP COLUMN \`${colName}\``);
+        } catch {
+          // Cột đã được xoá
         }
       }
 
@@ -2046,11 +2046,7 @@ export function createApiRouter(broadcastWs) {
         CREATE TABLE IF NOT EXISTS telemetry_history (
           id BIGINT AUTO_INCREMENT PRIMARY KEY,
           device_id INT NOT NULL,
-          temperature FLOAT DEFAULT NULL,
-          humidity FLOAT DEFAULT NULL,
-          power FLOAT DEFAULT NULL,
-          voltage FLOAT DEFAULT NULL,
-          current FLOAT DEFAULT NULL,
+          \`show\` TEXT DEFAULT NULL,
           raw_data TEXT DEFAULT NULL,
           recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           INDEX idx_telemetry_hist_dev_time (device_id, recorded_at),
@@ -2058,6 +2054,22 @@ export function createApiRouter(broadcastWs) {
           CONSTRAINT fk_telemetry_hist_device FOREIGN KEY (device_id) REFERENCES devices (device_id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
+
+      // Tự động nâng cấp bảng telemetry_history: thêm cột `show`, raw_data và xoá các cột cũ temperature, humidity, power, voltage, current
+      for (const colDef of dataColsToAdd) {
+        try {
+          await pool.query(`ALTER TABLE telemetry_history ADD COLUMN ${colDef}`);
+        } catch {
+          // Cột đã tồn tại
+        }
+      }
+      for (const colName of oldColsToDrop) {
+        try {
+          await pool.query(`ALTER TABLE telemetry_history DROP COLUMN \`${colName}\``);
+        } catch {
+          // Cột đã được xoá
+        }
+      }
 
       // Nếu bảng locations rỗng, nạp dữ liệu mẫu ban đầu để hệ thống có dữ liệu hiển thị ngay
       const [check] = await pool.query('SELECT COUNT(*) as count FROM locations');
@@ -2395,67 +2407,72 @@ export function createApiRouter(broadcastWs) {
         return res.status(400).json({ success: false, message: 'Vui lòng cung cấp device_code hoặc device_id' });
       }
 
-      const m = { ...(measurements || {}) };
+      const sourceData = measurements && typeof measurements === 'object' ? measurements : req.body;
+      const showObj = {};
+      const ignoredKeys = new Set(['device_code', 'device_id', 'deviceId', 'deviceCode', 'device_name', 'device_type', 'floor', 'param_name', 'param_value', 'measurements']);
+
+      Object.keys(sourceData || {}).forEach((k) => {
+        if (!ignoredKeys.has(k) && sourceData[k] !== undefined) {
+          showObj[k] = sourceData[k];
+        }
+      });
+
       if (param_name && param_value !== undefined) {
-        m[param_name] = Number(param_value);
+        showObj[param_name] = Number(param_value);
       }
 
-      const temp = m.temperature !== undefined ? Number(m.temperature) : (m.temp !== undefined ? Number(m.temp) : null);
-      const humi = m.humidity !== undefined ? Number(m.humidity) : (m.humi !== undefined ? Number(m.humi) : null);
-      const power = m.power !== undefined ? Number(m.power) : (m.watt !== undefined ? Number(m.watt) : null);
-      const volt = m.voltage !== undefined ? Number(m.voltage) : (m.volt !== undefined ? Number(m.volt) : null);
-      const curr = m.current !== undefined ? Number(m.current) : (m.curr !== undefined ? Number(m.curr) : null);
+      const rawPayload = {
+        device_code: device_code ? String(device_code).toUpperCase() : `DEV_${targetDeviceId}`,
+        ...showObj
+      };
+
+      const showJsonStr = JSON.stringify(showObj);
+      const rawJsonStr = JSON.stringify(rawPayload);
 
       await pool.query(`
-        INSERT INTO telemetry_data (device_id, temperature, humidity, power, voltage, current, raw_data, recorded_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+        INSERT INTO telemetry_data (device_id, \`show\`, raw_data, recorded_at)
+        VALUES (?, ?, ?, NOW())
         ON DUPLICATE KEY UPDATE
-          temperature = COALESCE(VALUES(temperature), temperature),
-          humidity = COALESCE(VALUES(humidity), humidity),
-          power = COALESCE(VALUES(power), power),
-          voltage = COALESCE(VALUES(voltage), voltage),
-          current = COALESCE(VALUES(current), current),
+          \`show\` = COALESCE(VALUES(\`show\`), \`show\`),
           raw_data = COALESCE(VALUES(raw_data), raw_data),
           recorded_at = NOW()
       `, [
         targetDeviceId,
-        (temp !== null && !isNaN(temp)) ? temp : null,
-        (humi !== null && !isNaN(humi)) ? humi : null,
-        (power !== null && !isNaN(power)) ? power : null,
-        (volt !== null && !isNaN(volt)) ? volt : null,
-        (curr !== null && !isNaN(curr)) ? curr : null,
-        JSON.stringify(m)
+        showJsonStr,
+        rawJsonStr
       ]);
 
-      // Lưu vào bảng telemetry_history để tích luỹ dữ liệu vẽ biểu đồ lịch sử tuần/tháng
+      // Lưu vào bảng telemetry_history để tích luỹ dữ liệu lịch sử
+      let insertedHistoryId = null;
       try {
-        await pool.query(`
-          INSERT INTO telemetry_history (device_id, temperature, humidity, power, voltage, current, raw_data, recorded_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+        const [histRes] = await pool.query(`
+          INSERT INTO telemetry_history (device_id, \`show\`, raw_data, recorded_at)
+          VALUES (?, ?, ?, NOW())
         `, [
           targetDeviceId,
-          (temp !== null && !isNaN(temp)) ? temp : null,
-          (humi !== null && !isNaN(humi)) ? humi : null,
-          (power !== null && !isNaN(power)) ? power : null,
-          (volt !== null && !isNaN(volt)) ? volt : null,
-          (curr !== null && !isNaN(curr)) ? curr : null,
-          JSON.stringify(m)
+          showJsonStr,
+          rawJsonStr
         ]);
+        insertedHistoryId = histRes.insertId;
       } catch (histErr) {
         console.warn('⚠️ Lỗi lưu telemetry_history:', histErr.message);
       }
 
+      const nowIso = new Date().toISOString();
       if (broadcastWs) {
         broadcastWs({
           type: 'TELEMETRY_DATA_SAVED',
+          id: insertedHistoryId || Date.now(),
           device_id: targetDeviceId,
-          device_code: device_code,
-          measurements: m,
-          recorded_at: new Date().toISOString()
+          device_code: device_code ? String(device_code).toUpperCase() : `DEV_${targetDeviceId}`,
+          show: showObj,
+          raw_data: rawPayload,
+          measurements: showObj,
+          recorded_at: nowIso
         });
       }
 
-      res.json({ success: true, message: 'Đã cập nhật 1 hàng số liệu đo đạc vào bảng telemetry_data thành công', device_id: targetDeviceId });
+      res.json({ success: true, message: 'Đã cập nhật 1 hàng số liệu đo đạc vào bảng telemetry_data thành công', device_id: targetDeviceId, show: showObj, raw_data: rawPayload });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }
@@ -2481,11 +2498,7 @@ export function createApiRouter(broadcastWs) {
           l.location_id,
           COALESCE(l.location_name, 'Dự án nội bộ') AS project_name,
           l.address AS project_address,
-          t.temperature,
-          t.humidity,
-          t.power,
-          t.voltage,
-          t.current,
+          t.\`show\`,
           t.raw_data,
           DATE_FORMAT(t.recorded_at, '%Y-%m-%d %H:%i:%s') AS recorded_at
         FROM telemetry_data t
@@ -2519,6 +2532,7 @@ export function createApiRouter(broadcastWs) {
   // 9. Lấy dữ liệu lịch sử viễn trắc từ bảng telemetry_history theo dự án hoặc thiết bị để vẽ biểu đồ & xem bảng lịch sử
   router.get('/telemetry-history', async (req, res) => {
     try {
+      await ensureIotTables();
       const { project_name, location_id, device_ids, device_code, search, order = 'ASC', limit = 500 } = req.query;
       let sql = `
         SELECT 
@@ -2533,11 +2547,7 @@ export function createApiRouter(broadcastWs) {
           l.location_id,
           g.gateway_sn,
           g.ip_address AS gateway_ip,
-          h.temperature,
-          h.humidity,
-          h.power,
-          h.voltage,
-          h.current,
+          h.\`show\`,
           h.raw_data,
           DATE_FORMAT(h.recorded_at, '%Y-%m-%d %H:%i:%s') AS recorded_at,
           DATE_FORMAT(h.recorded_at, '%H:%i %d/%m') AS time_label
@@ -2573,7 +2583,7 @@ export function createApiRouter(broadcastWs) {
         }
       }
       const sortDir = String(order).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
-      sql += ` ORDER BY h.recorded_at ${sortDir} LIMIT ?`;
+      sql += ` ORDER BY h.recorded_at ${sortDir}, h.id ${sortDir} LIMIT ?`;
       params.push(Math.min(Number(limit) || 500, 2000));
 
       const [rows] = await pool.query(sql, params);

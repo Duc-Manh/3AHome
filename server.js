@@ -99,25 +99,37 @@ app.use(
   })
 );
 
-// Bảo mật: Cấu hình CORS chặt chẽ
+// Bảo mật: Cấu hình CORS chặt chẽ (Hỗ trợ AAA_Web, AAA_Mobile và phần mềm Windows AAA_Software)
 const allowedOrigins = [
   'https://3ahome.vn',
   'http://3ahome.vn',
   'https://www.3ahome.vn',
   'http://www.3ahome.vn',
+  'https://api.3ahome.vn',
   'http://103.68.85.209',
   'http://103.68.85.209:5000',
   'http://localhost:5000',
   'http://localhost:5173',
+  'http://localhost:5174',
   'http://127.0.0.1:5000',
-  'http://127.0.0.1:5173'
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
+  'app://.',
+  'file://'
 ];
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Cho phép request hợp lệ từ domain hoặc các app mobile nội bộ
-      if (!origin || allowedOrigins.includes(origin) || origin.endsWith('3ahome.vn')) {
+      // Cho phép request hợp lệ từ domain, app mobile và phần mềm Desktop AAA_Software (Electron/File protocol)
+      if (
+        !origin ||
+        origin === 'null' ||
+        origin.startsWith('file://') ||
+        origin.startsWith('app://') ||
+        allowedOrigins.includes(origin) ||
+        origin.endsWith('3ahome.vn')
+      ) {
         callback(null, true);
       } else {
         callback(new Error('Truy cập bị chặn bởi chính sách CORS bảo mật của 3A Home'));
@@ -358,59 +370,62 @@ aedesBroker.on('publish', async (packet, client) => {
         }
 
         if (devId) {
-          const measurements = data.measurements || data;
+          const sourceData = data.measurements && typeof data.measurements === 'object' ? data.measurements : data;
+          const showObj = {};
+          const ignoredKeys = new Set(['device_code', 'device_id', 'deviceId', 'deviceCode', 'device_name', 'device_type', 'floor', 'measurements']);
 
-          const temp = measurements.temperature !== undefined ? Number(measurements.temperature) : (measurements.temp !== undefined ? Number(measurements.temp) : null);
-          const humi = measurements.humidity !== undefined ? Number(measurements.humidity) : (measurements.humi !== undefined ? Number(measurements.humi) : null);
-          const power = measurements.power !== undefined ? Number(measurements.power) : (measurements.watt !== undefined ? Number(measurements.watt) : null);
-          const volt = measurements.voltage !== undefined ? Number(measurements.voltage) : (measurements.volt !== undefined ? Number(measurements.volt) : null);
-          const curr = measurements.current !== undefined ? Number(measurements.current) : (measurements.curr !== undefined ? Number(measurements.curr) : null);
+          Object.keys(sourceData || {}).forEach((k) => {
+            if (!ignoredKeys.has(k) && sourceData[k] !== undefined) {
+              showObj[k] = sourceData[k];
+            }
+          });
+
+          const rawPayload = {
+            device_code: formattedDevCode,
+            ...showObj
+          };
+
+          const showJsonStr = JSON.stringify(showObj);
+          const rawJsonStr = JSON.stringify(rawPayload);
 
           await dbPool.query(`
-            INSERT INTO telemetry_data (device_id, temperature, humidity, power, voltage, current, raw_data, recorded_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+            INSERT INTO telemetry_data (device_id, \`show\`, raw_data, recorded_at)
+            VALUES (?, ?, ?, NOW())
             ON DUPLICATE KEY UPDATE
-              temperature = COALESCE(VALUES(temperature), temperature),
-              humidity = COALESCE(VALUES(humidity), humidity),
-              power = COALESCE(VALUES(power), power),
-              voltage = COALESCE(VALUES(voltage), voltage),
-              current = COALESCE(VALUES(current), current),
+              \`show\` = COALESCE(VALUES(\`show\`), \`show\`),
               raw_data = COALESCE(VALUES(raw_data), raw_data),
               recorded_at = NOW()
           `, [
             devId,
-            (temp !== null && !isNaN(temp)) ? temp : null,
-            (humi !== null && !isNaN(humi)) ? humi : null,
-            (power !== null && !isNaN(power)) ? power : null,
-            (volt !== null && !isNaN(volt)) ? volt : null,
-            (curr !== null && !isNaN(curr)) ? curr : null,
-            JSON.stringify(measurements)
+            showJsonStr,
+            rawJsonStr
           ]);
 
-          // Lưu vào bảng telemetry_history để tích luỹ dữ liệu vẽ biểu đồ lịch sử tuần/tháng
+          // Lưu vào bảng telemetry_history để tích luỹ dữ liệu lịch sử
+          let insertedHistoryId = null;
           try {
-            await dbPool.query(`
-              INSERT INTO telemetry_history (device_id, temperature, humidity, power, voltage, current, raw_data, recorded_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+            const [histRes] = await dbPool.query(`
+              INSERT INTO telemetry_history (device_id, \`show\`, raw_data, recorded_at)
+              VALUES (?, ?, ?, NOW())
             `, [
               devId,
-              (temp !== null && !isNaN(temp)) ? temp : null,
-              (humi !== null && !isNaN(humi)) ? humi : null,
-              (power !== null && !isNaN(power)) ? power : null,
-              (volt !== null && !isNaN(volt)) ? volt : null,
-              (curr !== null && !isNaN(curr)) ? curr : null,
-              JSON.stringify(measurements)
+              showJsonStr,
+              rawJsonStr
             ]);
+            insertedHistoryId = histRes.insertId;
           } catch (histErr) {
             console.warn('⚠️ Lỗi lưu telemetry_history:', histErr.message);
           }
 
-          console.log(`✅ [MQTT -> MySQL] Đã cập nhật 1 hàng duy nhất cho thiết bị [${devCode}] (device_id: ${devId})!`);
+          console.log(`✅ [MQTT -> MySQL] Đã cập nhật cho thiết bị [${formattedDevCode}] (device_id: ${devId}) - show: ${showJsonStr}`);
           broadcastWs({
             type: 'TELEMETRY_DATA_SAVED',
+            id: insertedHistoryId || Date.now(),
             device_id: devId,
-            device_code: devCode,
-            measurements: measurements,
+            device_code: formattedDevCode,
+            show: showObj,
+            raw_data: rawPayload,
+            measurements: showObj,
             recorded_at: new Date().toISOString()
           });
         }
