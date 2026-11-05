@@ -225,8 +225,125 @@ wss.on('connection', (ws, req) => {
   });
 });
 
+// Bộ nhớ tạm chống lặp lại gói tin do chính server vừa publish lên broker ngoài
+const recentSelfPublished = new Map();
+function markSelfPublished(topic, payloadStr) {
+  const key = `${topic}|${String(payloadStr).trim()}`;
+  recentSelfPublished.set(key, Date.now());
+  if (recentSelfPublished.size > 200) {
+    const now = Date.now();
+    for (const [k, ts] of recentSelfPublished.entries()) {
+      if (now - ts > 5000) recentSelfPublished.delete(k);
+    }
+  }
+}
+function isRecentlySelfPublished(topic, payloadStr) {
+  const key = `${topic}|${String(payloadStr).trim()}`;
+  const ts = recentSelfPublished.get(key);
+  if (!ts) return false;
+  if (Date.now() - ts < 1800) {
+    recentSelfPublished.delete(key);
+    return true;
+  }
+  recentSelfPublished.delete(key);
+  return false;
+}
+
+// Hàm gửi gói tin MQTT v3.1.1 nhanh qua TCP tới Broker ngoài (예: broker.hivemq.com:1883)
+function publishToExternalBroker(host, port, topic, payloadStr) {
+  try {
+    markSelfPublished(topic, payloadStr);
+    let sentPublish = false;
+    const client = net.createConnection({ host, port, timeout: 4000 }, () => {
+      const encodeLength = (len) => {
+        const bytes = [];
+        do {
+          let digit = len % 128;
+          len = Math.floor(len / 128);
+          if (len > 0) digit |= 0x80;
+          bytes.push(digit);
+        } while (len > 0);
+        return Buffer.from(bytes);
+      };
+
+      const clientId = `3ahome_srv_${Math.random().toString(16).slice(2, 8)}`;
+      const clientIdBuf = Buffer.from(clientId, 'utf8');
+      const connectVarHeader = Buffer.from([0x00, 0x04, 0x4d, 0x51, 0x54, 0x54, 0x04, 0x02, 0x00, 0x3c]);
+      const connectPayload = Buffer.concat([
+        Buffer.from([(clientIdBuf.length >> 8) & 0xff, clientIdBuf.length & 0xff]),
+        clientIdBuf
+      ]);
+      const connectBody = Buffer.concat([connectVarHeader, connectPayload]);
+      const connectPacket = Buffer.concat([Buffer.from([0x10]), encodeLength(connectBody.length), connectBody]);
+
+      const topicBuf = Buffer.from(topic, 'utf8');
+      const msgBuf = Buffer.from(String(payloadStr), 'utf8');
+      const pubBody = Buffer.concat([
+        Buffer.from([(topicBuf.length >> 8) & 0xff, topicBuf.length & 0xff]),
+        topicBuf,
+        msgBuf
+      ]);
+      const pubPacket = Buffer.concat([Buffer.from([0x30]), encodeLength(pubBody.length), pubBody]);
+      const disconnectPacket = Buffer.from([0xe0, 0x00]);
+
+      const flushPublish = () => {
+        if (sentPublish) return;
+        sentPublish = true;
+        try {
+          client.write(pubPacket, () => {
+            setTimeout(() => {
+              try {
+                client.write(disconnectPacket, () => client.end());
+              } catch {
+                client.destroy();
+              }
+            }, 120);
+          });
+        } catch {
+          client.destroy();
+        }
+      };
+
+      client.on('data', (chunk) => {
+        // Nhận CONNACK (0x20) từ broker rồi gửi gói PUBLISH
+        if (chunk && chunk.length >= 2 && chunk[0] === 0x20) {
+          flushPublish();
+        }
+      });
+
+      client.write(connectPacket);
+      setTimeout(flushPublish, 600);
+    });
+    client.on('error', () => client.destroy());
+    client.on('timeout', () => client.destroy());
+  } catch {
+    // ignore external broker error
+  }
+}
+
+let aedesBrokerRef = null;
+function publishMqttCommand(topic, payload, skipExternal = false) {
+  const payloadStr = typeof payload === 'object' ? JSON.stringify(payload) : String(payload);
+  if (aedesBrokerRef) {
+    aedesBrokerRef.publish(
+      {
+        topic,
+        payload: Buffer.from(payloadStr, 'utf8'),
+        qos: 0,
+        retain: false
+      },
+      () => {}
+    );
+  }
+  if (!skipExternal) {
+    const extHost = process.env.EXTERNAL_MQTT_HOST || 'broker.hivemq.com';
+    const extPort = Number(process.env.EXTERNAL_MQTT_PORT) || 1883;
+    publishToExternalBroker(extHost, extPort, topic, payloadStr);
+  }
+}
+
 // Đăng ký các tuyến API
-app.use('/api', createApiRouter(broadcastWs));
+app.use('/api', createApiRouter(broadcastWs, publishMqttCommand));
 
 // Tuyến fallback: Phục vụ Web AAA_Web (index.html) hoặc trả về thông tin API
 app.get('*', (req, res, next) => {
@@ -253,6 +370,7 @@ app.get('*', (req, res, next) => {
 // Khởi tạo MQTT Broker nội bộ (Port 1883) phục vụ Gateway 3ONEDATA & MQTTX
 // Khởi tạo MQTT Broker nội bộ phục vụ Gateway 3ONEDATA & IoT Devices
 const aedesBroker = await Aedes.createBroker();
+aedesBrokerRef = aedesBroker;
 const mqttServer = net.createServer(aedesBroker.handle.bind(aedesBroker));
 const MQTT_PORT = Number(process.env.MQTT_PORT) || 1883;
 const MQTTS_PORT = Number(process.env.MQTTS_PORT) || 8883;
@@ -332,103 +450,337 @@ aedesBroker.on('client', (client) => {
   console.log(`🔌 Thiết bị/Client mới kết nối MQTT: ${client ? client.id : 'unknown'}`);
 });
 
-aedesBroker.on('publish', async (packet, client) => {
-  if (client) {
-    const topic = packet.topic;
-    const msgStr = packet.payload.toString();
-    console.log(`📩 [MQTT] Nhận tin từ [${client.id}] - Topic: ${topic} - Data: ${msgStr}`);
+async function handleIncomingMqttTelemetry(topic, msgStr, sourceLabel = 'MQTT') {
+  console.log(`📩 [${sourceLabel}] Nhận tin - Topic: ${topic} - Data: ${msgStr}`);
 
+  try {
+    let data;
     try {
-      const data = JSON.parse(msgStr);
-      const { pool: dbPool } = await import('./src/config/db.js');
+      data = JSON.parse(msgStr);
+    } catch {
+      const numVal = Number(msgStr);
+      if (!Number.isNaN(numVal) && msgStr !== '') {
+        data = numVal;
+      } else {
+        return;
+      }
+    }
 
-      let devCode = data.device_code || data.deviceId || data.deviceCode;
-      if (!devCode && topic.includes('/')) {
-        const parts = topic.split('/');
+    const { pool: dbPool } = await import('./src/config/db.js');
+    const parts = topic.split('/').filter(Boolean);
+    const isCmdTopic =
+      parts.length >= 5 &&
+      parts[0] === '3ahome' &&
+      parts[1] === 'telemetry' &&
+      parts[3] === 'cmd';
+    const cmdChannel = isCmdTopic ? String(parts[4]).toLowerCase() : null;
+
+    let devCode =
+      typeof data === 'object' && data !== null
+        ? data.device_code || data.deviceId || data.deviceCode
+        : null;
+    if (!devCode && parts.length > 0) {
+      if (isCmdTopic) {
+        devCode = parts[2];
+      } else if (parts[0] === '3ahome' && parts[1] === 'telemetry' && parts.length >= 3) {
+        devCode = parts[2];
+      } else {
         devCode = parts[parts.length - 1];
       }
+    }
 
-      if (devCode) {
-        // Lọc ký tự mã thiết bị hợp lệ, chống tiêm nhiễm và spam
-        const formattedDevCode = String(devCode).trim().toUpperCase().replace(/[^A-Z0-9_\-]/g, '');
-        if (!formattedDevCode || formattedDevCode.length < 2 || formattedDevCode.length > 50) {
-          return;
-        }
+    if (devCode) {
+      const formattedDevCode = String(devCode)
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9_\-]/g, '');
+      if (!formattedDevCode || formattedDevCode.length < 2 || formattedDevCode.length > 50) {
+        return;
+      }
 
-        const [devRows] = await dbPool.query('SELECT device_id FROM devices WHERE device_code = ?', [formattedDevCode]);
-        let devId;
-        if (devRows.length > 0) {
-          devId = devRows[0].device_id;
-        } else {
-          // Tự động thêm thiết bị mới vào bảng devices nếu chưa có
-          const [insDev] = await dbPool.query(
-            'INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor) VALUES (1, ?, ?, ?, 1, ?)',
-            [formattedDevCode, (data.device_name || `Thiết bị ${formattedDevCode}`).slice(0, 100), (data.device_type || 'sensor').slice(0, 50), (data.floor || 'Khu vực chính').slice(0, 50)]
+      const [devRows] = await dbPool.query(
+        'SELECT device_id FROM devices WHERE device_code = ?',
+        [formattedDevCode]
+      );
+      let devId;
+      if (devRows.length > 0) {
+        devId = devRows[0].device_id;
+      } else {
+        const devName =
+          typeof data === 'object' && data !== null && data.device_name
+            ? data.device_name
+            : `Thiết bị ${formattedDevCode}`;
+        const devType =
+          typeof data === 'object' && data !== null && data.device_type
+            ? data.device_type
+            : 'sensor';
+        const devFloor =
+          typeof data === 'object' && data !== null && data.floor
+            ? data.floor
+            : 'Khu vực chính';
+        const [insDev] = await dbPool.query(
+          'INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor) VALUES (1, ?, ?, ?, 1, ?)',
+          [
+            formattedDevCode,
+            String(devName).slice(0, 100),
+            String(devType).slice(0, 50),
+            String(devFloor).slice(0, 50)
+          ]
+        );
+        devId = insDev.insertId;
+        console.log(
+          `✨ [MQTT Auto-Register] Đã tạo thiết bị mới [${formattedDevCode}] vào bảng devices (device_id: ${devId})!`
+        );
+      }
+
+      if (devId) {
+        let prevShowObj = {};
+        let existingMeter = null;
+        let existingControl = null;
+        let latestRowId = null;
+        try {
+          const [prevRows] = await dbPool.query(
+            'SELECT id, `show`, meter, control FROM telemetry_data WHERE device_id = ? ORDER BY id DESC LIMIT 1',
+            [devId]
           );
-          devId = insDev.insertId;
-          console.log(`✨ [MQTT Auto-Register] Đã tạo thiết bị mới [${formattedDevCode}] vào bảng devices (device_id: ${devId})!`);
+          if (prevRows.length > 0) {
+            latestRowId = prevRows[0].id;
+            existingMeter = prevRows[0].meter || null;
+            existingControl = prevRows[0].control || null;
+            if (prevRows[0].show) {
+              prevShowObj =
+                typeof prevRows[0].show === 'string'
+                  ? JSON.parse(prevRows[0].show)
+                  : prevRows[0].show;
+            }
+          }
+        } catch {
+          // ignore
         }
 
-        if (devId) {
-          const sourceData = data.measurements && typeof data.measurements === 'object' ? data.measurements : data;
-          const showObj = {};
-          const ignoredKeys = new Set(['device_code', 'device_id', 'deviceId', 'deviceCode', 'device_name', 'device_type', 'floor', 'measurements']);
-
+        const showObj = isCmdTopic ? { ...(prevShowObj || {}) } : {};
+        if (typeof data === 'object' && data !== null) {
+          const sourceData =
+            data.measurements && typeof data.measurements === 'object'
+              ? data.measurements
+              : data;
+          const ignoredKeys = new Set([
+            'device_code',
+            'device_id',
+            'deviceId',
+            'deviceCode',
+            'device_name',
+            'device_type',
+            'floor',
+            'measurements'
+          ]);
           Object.keys(sourceData || {}).forEach((k) => {
             if (!ignoredKeys.has(k) && sourceData[k] !== undefined) {
               showObj[k] = sourceData[k];
             }
           });
-
-          const rawPayload = {
-            device_code: formattedDevCode,
-            ...showObj
-          };
-
-          const showJsonStr = JSON.stringify(showObj);
-          const rawJsonStr = JSON.stringify(rawPayload);
-
-          let existingNote = null;
-          try {
-            const [prevRows] = await dbPool.query(
-              'SELECT note FROM telemetry_data WHERE device_id = ? AND note IS NOT NULL AND note != "" ORDER BY id DESC LIMIT 1',
-              [devId]
-            );
-            if (prevRows.length > 0) {
-              existingNote = prevRows[0].note;
-            }
-          } catch {
-            // ignore
-          }
-
-          const [insRes] = await dbPool.query(`
-            INSERT INTO telemetry_data (device_id, \`show\`, raw_data, note, recorded_at)
-            VALUES (?, ?, ?, ?, NOW())
-          `, [
-            devId,
-            showJsonStr,
-            rawJsonStr,
-            existingNote
-          ]);
-
-          console.log(`✅ [MQTT -> MySQL] Đã cập nhật cho thiết bị [${formattedDevCode}] (device_id: ${devId}) - show: ${showJsonStr}`);
-          broadcastWs({
-            type: 'TELEMETRY_DATA_SAVED',
-            id: insRes.insertId || Date.now(),
-            device_id: devId,
-            device_code: formattedDevCode,
-            show: showObj,
-            raw_data: rawPayload,
-            measurements: showObj,
-            recorded_at: new Date().toISOString()
-          });
+        } else if (cmdChannel) {
+          showObj[cmdChannel] = data;
         }
+
+        const rawPayload = {
+          device_code: formattedDevCode,
+          ...showObj
+        };
+
+        const showJsonStr = JSON.stringify(showObj);
+        const rawJsonStr = JSON.stringify(rawPayload);
+
+        let recordId = latestRowId;
+        if (isCmdTopic && latestRowId) {
+          await dbPool.query(
+            'UPDATE telemetry_data SET `show` = ?, raw_data = ?, recorded_at = NOW() WHERE id = ?',
+            [showJsonStr, rawJsonStr, latestRowId]
+          );
+        } else {
+          const [insRes] = await dbPool.query(
+            `
+            INSERT INTO telemetry_data (device_id, \`show\`, raw_data, meter, control, recorded_at)
+            VALUES (?, ?, ?, ?, ?, NOW())
+          `,
+            [devId, showJsonStr, rawJsonStr, existingMeter, existingControl]
+          );
+          recordId = insRes.insertId;
+        }
+
+        console.log(
+          `✅ [${sourceLabel} -> MySQL] Đã cập nhật cho thiết bị [${formattedDevCode}] (device_id: ${devId}) - show: ${showJsonStr}`
+        );
+        broadcastWs({
+          type: 'TELEMETRY_DATA_SAVED',
+          id: recordId || Date.now(),
+          device_id: devId,
+          device_code: formattedDevCode,
+          topic,
+          show: showObj,
+          raw_data: rawPayload,
+          measurements: showObj,
+          recorded_at: new Date().toISOString()
+        });
       }
-    } catch {
-      // Bỏ qua nếu tin nhắn không phải JSON
     }
+  } catch {
+    // Bỏ qua nếu tin nhắn không phải JSON/number hợp lệ
+  }
+}
+
+aedesBroker.on('publish', async (packet, client) => {
+  if (client) {
+    const topic = packet.topic;
+    const msgStr = packet.payload.toString().trim();
+    await handleIncomingMqttTelemetry(topic, msgStr, `MQTT:${client.id}`);
   }
 });
+
+// Bridge lắng nghe 2 chiều từ MQTT Broker ngoài (broker.hivemq.com:1883) trên topic 3ahome/telemetry/#
+function startExternalMqttSubscriberBridge(host, port) {
+  let socket = null;
+  let pingInterval = null;
+  let reconnectTimer = null;
+
+  const encodeLength = (len) => {
+    const bytes = [];
+    do {
+      let digit = len % 128;
+      len = Math.floor(len / 128);
+      if (len > 0) digit |= 0x80;
+      bytes.push(digit);
+    } while (len > 0);
+    return Buffer.from(bytes);
+  };
+
+  const connectBridge = () => {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+
+    try {
+      let rxBuffer = Buffer.alloc(0);
+      socket = net.createConnection({ host, port }, () => {
+        const clientId = `3ahome_bridge_${Math.random().toString(16).slice(2, 10)}`;
+        const clientIdBuf = Buffer.from(clientId, 'utf8');
+        const connectVarHeader = Buffer.from([
+          0x00, 0x04, 0x4d, 0x51, 0x54, 0x54, 0x04, 0x02, 0x00, 0x3c
+        ]);
+        const connectPayload = Buffer.concat([
+          Buffer.from([(clientIdBuf.length >> 8) & 0xff, clientIdBuf.length & 0xff]),
+          clientIdBuf
+        ]);
+        const connectBody = Buffer.concat([connectVarHeader, connectPayload]);
+        const connectPacket = Buffer.concat([
+          Buffer.from([0x10]),
+          encodeLength(connectBody.length),
+          connectBody
+        ]);
+        socket.write(connectPacket);
+      });
+
+      socket.on('data', (chunk) => {
+        rxBuffer = Buffer.concat([rxBuffer, chunk]);
+
+        while (rxBuffer.length >= 2) {
+          const byte0 = rxBuffer[0];
+          const packetType = byte0 & 0xf0;
+          let multiplier = 1;
+          let remainingLength = 0;
+          let offset = 1;
+          let encodedByte = 0;
+
+          do {
+            if (offset >= rxBuffer.length) {
+              return; // Chưa nhận đủ header
+            }
+            encodedByte = rxBuffer[offset++];
+            remainingLength += (encodedByte & 127) * multiplier;
+            multiplier *= 128;
+          } while ((encodedByte & 128) !== 0);
+
+          const totalPacketLen = offset + remainingLength;
+          if (rxBuffer.length < totalPacketLen) {
+            return; // Chưa nhận đủ payload của gói tin
+          }
+
+          const body = rxBuffer.subarray(offset, totalPacketLen);
+          rxBuffer = rxBuffer.subarray(totalPacketLen);
+
+          // CONNACK (0x20) -> Gửi gói SUBSCRIBE '3ahome/telemetry/#'
+          if (packetType === 0x20) {
+            const topicFilter = '3ahome/telemetry/#';
+            const filterBuf = Buffer.from(topicFilter, 'utf8');
+            const subBody = Buffer.concat([
+              Buffer.from([0x00, 0x01]), // Packet Identifier = 1
+              Buffer.from([(filterBuf.length >> 8) & 0xff, filterBuf.length & 0xff]),
+              filterBuf,
+              Buffer.from([0x00]) // QoS 0
+            ]);
+            const subPacket = Buffer.concat([
+              Buffer.from([0x82]),
+              encodeLength(subBody.length),
+              subBody
+            ]);
+            socket.write(subPacket);
+            console.log(`🌐 [HiveMQ Bridge] Đã kết nối & Subscribe ${host}:${port} (${topicFilter})`);
+
+            if (pingInterval) clearInterval(pingInterval);
+            pingInterval = setInterval(() => {
+              if (socket && !socket.destroyed) {
+                try {
+                  socket.write(Buffer.from([0xc0, 0x00]));
+                } catch {}
+              }
+            }, 25000);
+          } else if (packetType === 0x30 && body.length >= 2) {
+            // PUBLISH (0x30)
+            const topicLen = (body[0] << 8) | body[1];
+            if (body.length >= 2 + topicLen) {
+              const topic = body.subarray(2, 2 + topicLen).toString('utf8');
+              const qos = (byte0 >> 1) & 0x03;
+              const payloadStart = 2 + topicLen + (qos > 0 ? 2 : 0);
+              if (body.length >= payloadStart) {
+                const msgStr = body.subarray(payloadStart).toString('utf8').trim();
+                if (msgStr !== '' && !isRecentlySelfPublished(topic, msgStr)) {
+                  handleIncomingMqttTelemetry(topic, msgStr, 'HiveMQ');
+                }
+              }
+            }
+          }
+        }
+      });
+
+      const scheduleReconnect = () => {
+        if (pingInterval) {
+          clearInterval(pingInterval);
+          pingInterval = null;
+        }
+        if (!reconnectTimer) {
+          reconnectTimer = setTimeout(connectBridge, 4000);
+        }
+      };
+
+      socket.on('close', scheduleReconnect);
+      socket.on('error', () => {
+        try {
+          socket.destroy();
+        } catch {}
+        scheduleReconnect();
+      });
+    } catch {
+      reconnectTimer = setTimeout(connectBridge, 4000);
+    }
+  };
+
+  connectBridge();
+}
+
+const extBrokerHost = process.env.EXTERNAL_MQTT_HOST || 'broker.hivemq.com';
+const extBrokerPort = Number(process.env.EXTERNAL_MQTT_PORT) || 1883;
+startExternalMqttSubscriberBridge(extBrokerHost, extBrokerPort);
 
 // Khởi chạy server
 server.listen(PORT, async () => {

@@ -4,12 +4,88 @@ import jwt from 'jsonwebtoken';
 import rateLimit from 'express-rate-limit';
 import fs from 'fs';
 import path from 'path';
+import { exec } from 'child_process';
+import util from 'util';
 import { fileURLToPath } from 'url';
 import { pool } from '../config/db.js';
 import { sendConsultNotificationMail, sendCustomerAccountMail } from '../services/mailService.js';
 
+const execAsync = util.promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const SOFTWARE_ROOT = path.resolve(__dirname, '../../../AAA_Software');
+const WEB_ROOT = path.resolve(__dirname, '../../../AAA_Web');
+const PKG_PATH = path.join(SOFTWARE_ROOT, 'package.json');
+const PUBLIC_META_PATH = path.join(SOFTWARE_ROOT, 'public/build-meta.json');
+const DIST_META_PATH = path.join(SOFTWARE_ROOT, 'dist/build-meta.json');
+
+function getLatestDirMtime(dirPath) {
+  let maxMtime = 0;
+  if (!fs.existsSync(dirPath)) return maxMtime;
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'dist') continue;
+    const fullPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      const subMax = getLatestDirMtime(fullPath);
+      if (subMax > maxMtime) maxMtime = subMax;
+    } else if (entry.isFile()) {
+      const stat = fs.statSync(fullPath);
+      if (stat.mtimeMs > maxMtime) maxMtime = stat.mtimeMs;
+    }
+  }
+  return maxMtime;
+}
+
+async function getGitHead(repoDir) {
+  try {
+    if (!fs.existsSync(repoDir)) return '';
+    const { stdout } = await execAsync('git rev-parse HEAD', { cwd: repoDir });
+    return stdout.trim();
+  } catch {
+    return '';
+  }
+}
+
+function readPackageVersion() {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(PKG_PATH, 'utf-8'));
+    return pkg.version || '1.0.0';
+  } catch {
+    return '1.0.0';
+  }
+}
+
+function readBuildMeta() {
+  try {
+    if (fs.existsSync(PUBLIC_META_PATH)) {
+      return JSON.parse(fs.readFileSync(PUBLIC_META_PATH, 'utf-8'));
+    }
+    if (fs.existsSync(DIST_META_PATH)) {
+      return JSON.parse(fs.readFileSync(DIST_META_PATH, 'utf-8'));
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function syncDirRecursive(srcDir, destDir) {
+  if (!fs.existsSync(srcDir)) return;
+  if (!fs.existsSync(destDir)) {
+    fs.mkdirSync(destDir, { recursive: true });
+  }
+  const entries = fs.readdirSync(srcDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = path.join(srcDir, entry.name);
+    const destPath = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      syncDirRecursive(srcPath, destPath);
+    } else if (entry.isFile()) {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
 
 // Hàm tạo tên file ảnh an toàn, triệt tiêu nguy cơ Path Traversal (../) và giới hạn đuôi file ảnh
 function generateSafeImageName(prefix = '', rawFileName = '') {
@@ -37,7 +113,7 @@ function generateSafeImageName(prefix = '', rawFileName = '') {
   return `[${dd}-${mm}-${yyyy}][${codeimg}]${ext}`;
 }
 
-export function createApiRouter(broadcastWs) {
+export function createApiRouter(broadcastWs, publishMqttCommand) {
   const router = express.Router();
 
   // Cấu hình JWT Secret Key & Quản lý phiên làm việc bảo mật
@@ -529,15 +605,14 @@ export function createApiRouter(broadcastWs) {
       const validPass = loc.customer_pass || '3AH@me';
 
       let isPassMatch = false;
-      if (validPass.startsWith('$2a$') || validPass.startsWith('$2b$')) {
-        isPassMatch = await bcrypt.compare(inputPass, validPass);
-      } else {
-        isPassMatch = (validPass === inputPass);
-        if (isPassMatch) {
-          // 5. Tự động băm Bcrypt 100% mật khẩu thô trong database
+      if (inputPass === validPass) {
+        isPassMatch = true;
+        if (!validPass.startsWith('$2a$') && !validPass.startsWith('$2b$')) {
           const upgradedHash = await bcrypt.hash(inputPass, 10);
           await pool.query('UPDATE locations SET customer_pass = ? WHERE location_id = ?', [upgradedHash, loc.location_id]);
         }
+      } else if (validPass.startsWith('$2a$') || validPass.startsWith('$2b$')) {
+        isPassMatch = await bcrypt.compare(inputPass, validPass);
       }
 
       if (!isPassMatch) {
@@ -548,21 +623,30 @@ export function createApiRouter(broadcastWs) {
 
       // Lấy thông tin gateway và devices liên kết với location này
       const [gws] = await pool.query(
-        'SELECT gateway_id, gateway_sn, ip_address, status, last_seen FROM gateways WHERE location_id = ? LIMIT 1',
+        'SELECT gateway_id, gateway_sn, ip_address, status, last_seen FROM gateways WHERE location_id = ? ORDER BY gateway_id ASC',
         [loc.location_id]
       );
       const gateway = gws.length > 0 ? gws[0] : null;
+      const gatewayIds = gws.map((g) => g.gateway_id);
 
       let devices = [];
-      if (gateway) {
+      if (gatewayIds.length > 0) {
+        const placeholders = gatewayIds.map(() => '?').join(',');
         const [devs] = await pool.query(
           `SELECT d.device_id, d.device_code, d.device_name, d.device_type, d.slave_address, d.floor,
-                  t.temperature, t.humidity, t.power, t.voltage, t.current, t.raw_data, t.recorded_at
+                  t.\`show\`, t.raw_data, t.meter, t.control, t.recorded_at
            FROM devices d
-           LEFT JOIN telemetry_data t ON d.device_id = t.device_id
-           WHERE d.gateway_id = ?
-           ORDER BY d.slave_address ASC`,
-          [gateway.gateway_id]
+           LEFT JOIN telemetry_data t
+             ON t.id = (
+               SELECT t2.id
+               FROM telemetry_data t2
+               WHERE t2.device_id = d.device_id
+               ORDER BY t2.recorded_at DESC, t2.id DESC
+               LIMIT 1
+             )
+           WHERE d.gateway_id IN (${placeholders})
+           ORDER BY d.slave_address ASC, d.device_id ASC`,
+          gatewayIds
         );
         devices = devs;
       }
@@ -594,7 +678,7 @@ export function createApiRouter(broadcastWs) {
           customer_name: loc.customer_name || loc.location_name,
           customer_email: loc.customer_email,
           customer_phone: loc.customer_phone,
-          customer_pass: loc.customer_pass || '3AH@me',
+          customer_pass: inputPass,
           address: loc.address,
           status: loc.status,
           gateway: gateway,
@@ -2017,7 +2101,8 @@ export function createApiRouter(broadcastWs) {
           device_id INT NOT NULL,
           \`show\` TEXT DEFAULT NULL,
           raw_data TEXT DEFAULT NULL,
-          note TEXT DEFAULT NULL,
+          meter TEXT DEFAULT NULL,
+          control TEXT DEFAULT NULL,
           recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           INDEX idx_telemetry_dev_time (device_id, recorded_at),
           INDEX idx_telemetry_time (recorded_at),
@@ -2025,7 +2110,7 @@ export function createApiRouter(broadcastWs) {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
       `);
 
-      // Tự động nâng cấp bảng telemetry_data: thêm cột id (nếu chưa có), `show`, raw_data, note và xoá các cột cũ temperature, humidity, power, voltage, current
+      // Tự động nâng cấp bảng telemetry_data: thêm cột id (nếu chưa có), `show`, raw_data, meter, control và xoá các cột cũ temperature, humidity, power, voltage, current, note
       try {
         const [tdCols] = await pool.query('SHOW COLUMNS FROM telemetry_data');
         const tdColNames = tdCols.map((c) => c.Field);
@@ -2043,7 +2128,8 @@ export function createApiRouter(broadcastWs) {
       const dataColsToAdd = [
         "`show` TEXT DEFAULT NULL",
         "raw_data TEXT DEFAULT NULL",
-        "note TEXT DEFAULT NULL"
+        "meter TEXT DEFAULT NULL",
+        "control TEXT DEFAULT NULL"
       ];
       for (const colDef of dataColsToAdd) {
         try {
@@ -2052,7 +2138,7 @@ export function createApiRouter(broadcastWs) {
           // Cột đã tồn tại
         }
       }
-      const oldColsToDrop = ['temperature', 'humidity', 'power', 'voltage', 'current'];
+      const oldColsToDrop = ['temperature', 'humidity', 'power', 'voltage', 'current', 'note'];
       for (const colName of oldColsToDrop) {
         try {
           await pool.query(`ALTER TABLE telemetry_data DROP COLUMN \`${colName}\``);
@@ -2437,28 +2523,31 @@ export function createApiRouter(broadcastWs) {
       const showJsonStr = JSON.stringify(showObj);
       const rawJsonStr = JSON.stringify(rawPayload);
 
-      // Giữ lại giá trị note gần nhất của thiết bị nếu đã có
-      let existingNote = null;
+      // Giữ lại giá trị meter, control gần nhất của thiết bị nếu đã có
+      let existingMeter = null;
+      let existingControl = null;
       try {
         const [prevRows] = await pool.query(
-          'SELECT note FROM telemetry_data WHERE device_id = ? AND note IS NOT NULL AND note != "" ORDER BY id DESC LIMIT 1',
+          'SELECT meter, control FROM telemetry_data WHERE device_id = ? ORDER BY id DESC LIMIT 1',
           [targetDeviceId]
         );
         if (prevRows.length > 0) {
-          existingNote = prevRows[0].note;
+          existingMeter = prevRows[0].meter || null;
+          existingControl = prevRows[0].control || null;
         }
       } catch {
         // ignore
       }
 
       const [insRes] = await pool.query(`
-        INSERT INTO telemetry_data (device_id, \`show\`, raw_data, note, recorded_at)
-        VALUES (?, ?, ?, ?, NOW())
+        INSERT INTO telemetry_data (device_id, \`show\`, raw_data, meter, control, recorded_at)
+        VALUES (?, ?, ?, ?, ?, NOW())
       `, [
         targetDeviceId,
         showJsonStr,
         rawJsonStr,
-        existingNote
+        existingMeter,
+        existingControl
       ]);
 
       const nowIso = new Date().toISOString();
@@ -2504,7 +2593,8 @@ export function createApiRouter(broadcastWs) {
           l.address AS project_address,
           t.\`show\`,
           t.raw_data,
-          t.note,
+          t.meter,
+          t.control,
           DATE_FORMAT(t.recorded_at, '%Y-%m-%d %H:%i:%s') AS recorded_at,
           DATE_FORMAT(t.recorded_at, '%H:%i %d/%m') AS time_label
         FROM telemetry_data t
@@ -2564,6 +2654,47 @@ export function createApiRouter(broadcastWs) {
         Number(deviceId)
       ]);
       res.json({ success: true, message: 'Đã lưu ghi chú vào bảng telemetry_data thành công', device_id: Number(deviceId), note });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 8.1b. Cập nhật cột meter và control trong bảng telemetry_data theo device_id
+  router.put('/telemetry-data/:deviceId/meter-control', async (req, res) => {
+    const { deviceId } = req.params;
+    const { meter, control, device_ids } = req.body || {};
+    try {
+      await ensureIotTables();
+      const targetIds = Array.isArray(device_ids) && device_ids.length > 0
+        ? device_ids.map((id) => Number(id)).filter((n) => !Number.isNaN(n) && n > 0)
+        : [Number(deviceId)].filter((n) => !Number.isNaN(n) && n > 0);
+      if (targetIds.length === 0) {
+        return res.status(400).json({ success: false, message: 'Thiếu deviceId hợp lệ' });
+      }
+      const setClauses = [];
+      const values = [];
+      if (meter !== undefined) {
+        setClauses.push('meter = ?');
+        values.push(meter !== null && String(meter).trim() !== '' ? String(meter).trim() : null);
+      }
+      if (control !== undefined) {
+        setClauses.push('control = ?');
+        values.push(control !== null && String(control).trim() !== '' ? String(control).trim() : null);
+      }
+      if (setClauses.length > 0) {
+        const placeholders = targetIds.map(() => '?').join(',');
+        await pool.query(
+          `UPDATE telemetry_data SET ${setClauses.join(', ')} WHERE device_id IN (${placeholders})`,
+          [...values, ...targetIds]
+        );
+      }
+      res.json({
+        success: true,
+        message: 'Đã lưu cột meter / control vào bảng telemetry_data thành công',
+        device_ids: targetIds,
+        meter,
+        control
+      });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }
@@ -2776,6 +2907,223 @@ export function createApiRouter(broadcastWs) {
     } catch (err) {
       console.error('Lỗi xóa vật tư storage:', err);
       res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // Kiểm tra phiên bản mới của AAA_Software
+  router.get('/software-version', async (req, res) => {
+    try {
+      const version = readPackageVersion();
+      const meta = readBuildMeta();
+      const webMtime = getLatestDirMtime(path.join(WEB_ROOT, 'src'));
+      const softMtime = getLatestDirMtime(path.join(SOFTWARE_ROOT, 'src'));
+      const latestSourceMtime = Math.max(webMtime, softMtime);
+      const webGitHead = await getGitHead(WEB_ROOT);
+
+      let hasUpdate = false;
+      if (!meta) {
+        hasUpdate = true;
+      } else {
+        const mtimeChanged = latestSourceMtime > (Number(meta.sourceMtime) || 0) + 1500;
+        const gitChanged = Boolean(webGitHead && meta.gitHead && webGitHead !== meta.gitHead);
+        hasUpdate = mtimeChanged || gitChanged;
+      }
+
+      res.json({
+        success: true,
+        hasUpdate,
+        version: meta?.version || version,
+        builtAt: meta?.builtAt || null,
+        latestSourceMtime,
+        webGitHead
+      });
+    } catch (err) {
+      res.status(500).json({ success: false, hasUpdate: false, version: readPackageVersion(), message: err.message });
+    }
+  });
+
+  // Tự động tải đồng bộ code mới nhất và build lại AAA_Software
+  router.post('/software-update', async (req, res) => {
+    try {
+      const metaBefore = readBuildMeta();
+      const webMtimeBefore = getLatestDirMtime(path.join(WEB_ROOT, 'src'));
+      const softMtimeBefore = getLatestDirMtime(path.join(SOFTWARE_ROOT, 'src'));
+      const latestBefore = Math.max(webMtimeBefore, softMtimeBefore);
+      const gitBefore = await getGitHead(WEB_ROOT);
+      const hadUpdate =
+        !metaBefore ||
+        latestBefore > (Number(metaBefore.sourceMtime) || 0) + 1500 ||
+        Boolean(gitBefore && metaBefore.gitHead && gitBefore !== metaBefore.gitHead);
+
+      if (fs.existsSync(WEB_ROOT)) {
+        try {
+          await execAsync('git pull --rebase --autostash', { cwd: WEB_ROOT, timeout: 15000 });
+        } catch {
+          // ignore offline
+        }
+        syncDirRecursive(path.join(WEB_ROOT, 'src/pages'), path.join(SOFTWARE_ROOT, 'src/pages'));
+        syncDirRecursive(path.join(WEB_ROOT, 'src/components/dashboard'), path.join(SOFTWARE_ROOT, 'src/components/dashboard'));
+        syncDirRecursive(path.join(WEB_ROOT, 'src/components/employee'), path.join(SOFTWARE_ROOT, 'src/components/employee'));
+      }
+
+      let nextVersion = readPackageVersion();
+      try {
+        const pkg = JSON.parse(fs.readFileSync(PKG_PATH, 'utf-8'));
+        const parts = String(pkg.version || '1.0.0').split('.').map((n) => Number(n) || 0);
+        if (hadUpdate) {
+          parts[2] = (parts[2] || 0) + 1;
+          nextVersion = `${parts[0] || 1}.${parts[1] || 0}.${parts[2]}`;
+          pkg.version = nextVersion;
+          fs.writeFileSync(PKG_PATH, JSON.stringify(pkg, null, 2) + '\n', 'utf-8');
+        }
+      } catch {}
+
+      await execAsync('npm run build', { cwd: SOFTWARE_ROOT, timeout: 120000 });
+
+      const webMtimeAfter = getLatestDirMtime(path.join(WEB_ROOT, 'src'));
+      const softMtimeAfter = getLatestDirMtime(path.join(SOFTWARE_ROOT, 'src'));
+      const latestSourceMtime = Math.max(webMtimeAfter, softMtimeAfter, Date.now());
+      const webGitHead = await getGitHead(WEB_ROOT);
+
+      const newMeta = {
+        version: nextVersion,
+        builtAt: new Date().toISOString(),
+        sourceMtime: latestSourceMtime,
+        gitHead: webGitHead
+      };
+
+      try {
+        fs.mkdirSync(path.dirname(PUBLIC_META_PATH), { recursive: true });
+        fs.writeFileSync(PUBLIC_META_PATH, JSON.stringify(newMeta, null, 2), 'utf-8');
+      } catch {}
+      try {
+        fs.mkdirSync(path.dirname(DIST_META_PATH), { recursive: true });
+        fs.writeFileSync(DIST_META_PATH, JSON.stringify(newMeta, null, 2), 'utf-8');
+      } catch {}
+
+      res.json({
+        success: true,
+        hasUpdate: false,
+        version: nextVersion,
+        builtAt: newMeta.builtAt,
+        message: `Bạn đang sử dụng phiên bản v.${nextVersion} mới nhất`
+      });
+    } catch (err) {
+      res.status(500).json({ success: false, hasUpdate: true, version: readPackageVersion(), message: err.message });
+    }
+  });
+
+  // =========================================================================
+  // API ĐIỀU KHIỂN THIẾT BỊ TỪ APP MOBILE (Publish MQTT + Cập nhật telemetry_data)
+  // Topic: 3ahome/telemetry/<device_code>/cmd/<channel> | Payload: number (0/1 hoặc 0..50)
+  // =========================================================================
+  router.post('/device-control', async (req, res) => {
+    try {
+      const { device_code, channel, value, mqtt_published } = req.body || {};
+      const formattedDevCode = String(device_code || '').trim().toUpperCase().replace(/[^A-Z0-9_\-]/g, '');
+      const formattedChannel = String(channel || 'm1').trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+      const numericValue = Number(value);
+
+      if (!formattedDevCode || !formattedChannel || Number.isNaN(numericValue)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Thiếu thông tin device_code, channel hoặc giá trị number không hợp lệ'
+        });
+      }
+
+      const cmdTopic = `3ahome/telemetry/${formattedDevCode}/cmd/${formattedChannel}`;
+
+      // 1. Publish lệnh điều khiển kiểu number qua MQTT Broker
+      if (typeof publishMqttCommand === 'function') {
+        publishMqttCommand(cmdTopic, numericValue, Boolean(mqtt_published));
+      }
+
+      // 2. Đồng bộ giá trị kênh điều khiển vào bảng telemetry_data trong MySQL
+      const [devRows] = await pool.query(
+        'SELECT device_id FROM devices WHERE device_code = ? LIMIT 1',
+        [formattedDevCode]
+      );
+
+      if (devRows.length > 0) {
+        const devId = devRows[0].device_id;
+        const [latestRows] = await pool.query(
+          'SELECT id, `show`, raw_data, meter, control FROM telemetry_data WHERE device_id = ? ORDER BY id DESC LIMIT 1',
+          [devId]
+        );
+
+        let showObj = {};
+        let rawObj = { device_code: formattedDevCode };
+        let existingMeter = null;
+        let existingControl = null;
+
+        if (latestRows.length > 0) {
+          existingMeter = latestRows[0].meter || null;
+          existingControl = latestRows[0].control || null;
+          try {
+            if (latestRows[0].show) {
+              showObj = typeof latestRows[0].show === 'string' ? JSON.parse(latestRows[0].show) : { ...latestRows[0].show };
+            }
+          } catch {}
+          try {
+            if (latestRows[0].raw_data) {
+              rawObj = typeof latestRows[0].raw_data === 'string' ? JSON.parse(latestRows[0].raw_data) : { ...latestRows[0].raw_data };
+            }
+          } catch {}
+        }
+
+        showObj[formattedChannel] = numericValue;
+        rawObj = {
+          ...rawObj,
+          device_code: formattedDevCode,
+          ...showObj,
+          [formattedChannel]: numericValue
+        };
+
+        const showJsonStr = JSON.stringify(showObj);
+        const rawJsonStr = JSON.stringify(rawObj);
+
+        if (latestRows.length > 0) {
+          await pool.query(
+            'UPDATE telemetry_data SET `show` = ?, raw_data = ?, recorded_at = NOW() WHERE id = ?',
+            [showJsonStr, rawJsonStr, latestRows[0].id]
+          );
+        } else {
+          await pool.query(
+            'INSERT INTO telemetry_data (device_id, `show`, raw_data, meter, control, recorded_at) VALUES (?, ?, ?, ?, ?, NOW())',
+            [devId, showJsonStr, rawJsonStr, existingMeter, existingControl]
+          );
+        }
+
+        if (typeof broadcastWs === 'function') {
+          broadcastWs({
+            type: 'TELEMETRY_DATA_SAVED',
+            device_id: devId,
+            device_code: formattedDevCode,
+            show: showObj,
+            raw_data: rawObj,
+            measurements: showObj,
+            meter: existingMeter,
+            control: existingControl,
+            recorded_at: new Date().toISOString()
+          });
+        }
+      }
+
+      console.log(`🎛️ [Device Control] Đã xuất lệnh MQTT [${cmdTopic}] = ${numericValue}`);
+      return res.json({
+        success: true,
+        topic: cmdTopic,
+        device_code: formattedDevCode,
+        channel: formattedChannel,
+        value: numericValue
+      });
+    } catch (err) {
+      console.error('❌ Lỗi API /api/device-control:', err.message);
+      return res.status(500).json({
+        success: false,
+        message: 'Không thể gửi lệnh điều khiển thiết bị',
+        error: err.message
+      });
     }
   });
 
