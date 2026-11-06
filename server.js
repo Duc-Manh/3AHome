@@ -538,20 +538,46 @@ async function handleIncomingMqttTelemetry(topic, msgStr, sourceLabel = 'MQTT') 
         let existingMeter = null;
         let existingControl = null;
         let latestRowId = null;
+        const normalizeMeterControl = (val) => {
+          if (val === null || val === undefined) return null;
+          if (typeof val === 'object') {
+            try {
+              const s = JSON.stringify(val);
+              return s && s !== '{}' && s !== '[]' && s !== 'null' ? s : null;
+            } catch {
+              return null;
+            }
+          }
+          const trimmed = String(val).trim();
+          if (
+            !trimmed ||
+            trimmed === '[object Object]' ||
+            trimmed === 'null' ||
+            trimmed === 'undefined' ||
+            trimmed === '{}' ||
+            trimmed === '[]'
+          ) {
+            return null;
+          }
+          return trimmed;
+        };
         try {
           const [prevRows] = await dbPool.query(
-            'SELECT id, `show`, meter, control FROM telemetry_data WHERE device_id = ? ORDER BY id DESC LIMIT 1',
+            'SELECT id, `show`, meter, control FROM telemetry_data WHERE device_id = ? ORDER BY id DESC LIMIT 20',
             [devId]
           );
           if (prevRows.length > 0) {
             latestRowId = prevRows[0].id;
-            existingMeter = prevRows[0].meter || null;
-            existingControl = prevRows[0].control || null;
             if (prevRows[0].show) {
               prevShowObj =
                 typeof prevRows[0].show === 'string'
                   ? JSON.parse(prevRows[0].show)
                   : prevRows[0].show;
+            }
+            for (const pr of prevRows) {
+              if (!existingMeter) existingMeter = normalizeMeterControl(pr.meter);
+              if (!existingControl) existingControl = normalizeMeterControl(pr.control);
+              if (existingMeter && existingControl) break;
             }
           }
         } catch {
@@ -620,6 +646,8 @@ async function handleIncomingMqttTelemetry(topic, msgStr, sourceLabel = 'MQTT') 
           show: showObj,
           raw_data: rawPayload,
           measurements: showObj,
+          meter: existingMeter,
+          control: existingControl,
           recorded_at: new Date().toISOString()
         });
       }

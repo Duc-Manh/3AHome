@@ -2549,17 +2549,42 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
       const showJsonStr = JSON.stringify(showObj);
       const rawJsonStr = JSON.stringify(rawPayload);
 
+      const normalizeDbMeterControl = (val) => {
+        if (val === null || val === undefined) return null;
+        if (typeof val === 'object') {
+          try {
+            const s = JSON.stringify(val);
+            return s && s !== '{}' && s !== '[]' && s !== 'null' ? s : null;
+          } catch {
+            return null;
+          }
+        }
+        const trimmed = String(val).trim();
+        if (
+          !trimmed ||
+          trimmed === '[object Object]' ||
+          trimmed === 'null' ||
+          trimmed === 'undefined' ||
+          trimmed === '{}' ||
+          trimmed === '[]'
+        ) {
+          return null;
+        }
+        return trimmed;
+      };
+
       // Giữ lại giá trị meter, control gần nhất của thiết bị nếu đã có
       let existingMeter = null;
       let existingControl = null;
       try {
         const [prevRows] = await pool.query(
-          'SELECT meter, control FROM telemetry_data WHERE device_id = ? ORDER BY id DESC LIMIT 1',
+          'SELECT meter, control FROM telemetry_data WHERE device_id = ? ORDER BY id DESC LIMIT 20',
           [targetDeviceId]
         );
-        if (prevRows.length > 0) {
-          existingMeter = prevRows[0].meter || null;
-          existingControl = prevRows[0].control || null;
+        for (const pr of prevRows) {
+          if (!existingMeter) existingMeter = normalizeDbMeterControl(pr.meter);
+          if (!existingControl) existingControl = normalizeDbMeterControl(pr.control);
+          if (existingMeter && existingControl) break;
         }
       } catch {
         // ignore
@@ -2586,11 +2611,13 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
           show: showObj,
           raw_data: rawPayload,
           measurements: showObj,
+          meter: existingMeter,
+          control: existingControl,
           recorded_at: nowIso
         });
       }
 
-      res.json({ success: true, message: 'Đã lưu số liệu đo đạc vào bảng telemetry_data thành công', device_id: targetDeviceId, show: showObj, raw_data: rawPayload });
+      res.json({ success: true, message: 'Đã lưu số liệu đo đạc vào bảng telemetry_data thành công', device_id: targetDeviceId, show: showObj, raw_data: rawPayload, meter: existingMeter, control: existingControl });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }
@@ -2663,7 +2690,68 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
       params.push(Math.min(Number(limit) || 500, 2000));
 
       const [rows] = await pool.query(sql, params);
-      res.json({ success: true, count: rows.length, data: rows });
+
+      const normalizeColVal = (val) => {
+        if (val === null || val === undefined) return null;
+        if (typeof val === 'object') {
+          try {
+            const s = JSON.stringify(val);
+            return s && s !== '{}' && s !== '[]' && s !== 'null' ? s : null;
+          } catch {
+            return null;
+          }
+        }
+        const trimmed = String(val).trim();
+        if (
+          !trimmed ||
+          trimmed === '[object Object]' ||
+          trimmed === 'null' ||
+          trimmed === 'undefined' ||
+          trimmed === '{}' ||
+          trimmed === '[]'
+        ) {
+          return null;
+        }
+        return trimmed;
+      };
+
+      const latestMeterByDev = new Map();
+      const latestControlByDev = new Map();
+      try {
+        const [mcRows] = await pool.query(`
+          SELECT device_id, meter, control
+          FROM telemetry_data
+          WHERE (meter IS NOT NULL AND meter <> '')
+             OR (control IS NOT NULL AND control <> '')
+          ORDER BY id DESC
+        `);
+        for (const mc of mcRows) {
+          const dId = Number(mc.device_id);
+          if (!latestMeterByDev.has(dId)) {
+            const mVal = normalizeColVal(mc.meter);
+            if (mVal) latestMeterByDev.set(dId, mVal);
+          }
+          if (!latestControlByDev.has(dId)) {
+            const cVal = normalizeColVal(mc.control);
+            if (cVal) latestControlByDev.set(dId, cVal);
+          }
+        }
+      } catch {
+        // ignore
+      }
+
+      const normalizedRows = rows.map((r) => {
+        const dId = Number(r.device_id);
+        const normMeter = normalizeColVal(r.meter) || latestMeterByDev.get(dId) || null;
+        const normControl = normalizeColVal(r.control) || latestControlByDev.get(dId) || null;
+        return {
+          ...r,
+          meter: normMeter,
+          control: normControl
+        };
+      });
+
+      res.json({ success: true, count: normalizedRows.length, data: normalizedRows });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }
@@ -2697,15 +2785,38 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
       if (targetIds.length === 0) {
         return res.status(400).json({ success: false, message: 'Thiếu deviceId hợp lệ' });
       }
+      const normalizeInputVal = (val) => {
+        if (val === null || val === undefined) return null;
+        if (typeof val === 'object') {
+          try {
+            const s = JSON.stringify(val);
+            return s && s !== '{}' && s !== '[]' && s !== 'null' ? s : null;
+          } catch {
+            return null;
+          }
+        }
+        const trimmed = String(val).trim();
+        if (
+          !trimmed ||
+          trimmed === '[object Object]' ||
+          trimmed === 'null' ||
+          trimmed === 'undefined' ||
+          trimmed === '{}' ||
+          trimmed === '[]'
+        ) {
+          return null;
+        }
+        return trimmed;
+      };
       const setClauses = [];
       const values = [];
       if (meter !== undefined) {
         setClauses.push('meter = ?');
-        values.push(meter !== null && String(meter).trim() !== '' ? String(meter).trim() : null);
+        values.push(normalizeInputVal(meter));
       }
       if (control !== undefined) {
         setClauses.push('control = ?');
-        values.push(control !== null && String(control).trim() !== '' ? String(control).trim() : null);
+        values.push(normalizeInputVal(control));
       }
       if (setClauses.length > 0) {
         const placeholders = targetIds.map(() => '?').join(',');
@@ -2718,8 +2829,8 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
         success: true,
         message: 'Đã lưu cột meter / control vào bảng telemetry_data thành công',
         device_ids: targetIds,
-        meter,
-        control
+        meter: meter !== undefined ? normalizeInputVal(meter) : undefined,
+        control: control !== undefined ? normalizeInputVal(control) : undefined
       });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
@@ -3083,8 +3194,18 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
         let existingControl = null;
 
         if (latestRows.length > 0) {
-          existingMeter = latestRows[0].meter || null;
-          existingControl = latestRows[0].control || null;
+          existingMeter =
+            latestRows[0].meter !== null && latestRows[0].meter !== undefined
+              ? typeof latestRows[0].meter === 'object'
+                ? JSON.stringify(latestRows[0].meter)
+                : String(latestRows[0].meter)
+              : null;
+          existingControl =
+            latestRows[0].control !== null && latestRows[0].control !== undefined
+              ? typeof latestRows[0].control === 'object'
+                ? JSON.stringify(latestRows[0].control)
+                : String(latestRows[0].control)
+              : null;
           try {
             if (latestRows[0].show) {
               showObj = typeof latestRows[0].show === 'string' ? JSON.parse(latestRows[0].show) : { ...latestRows[0].show };
