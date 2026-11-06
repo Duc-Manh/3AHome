@@ -2045,8 +2045,13 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
   // API QUẢN LÝ DỰ ÁN & THIẾT BỊ IOT (locations, gateways, devices)
   // =========================================================================
 
-  // Khởi tạo bảng nếu chưa có
+  // Khởi tạo bảng nếu chưa có (chạy 1 lần duy nhất và ghi nhớ trạng thái để không khoá bảng MySQL mỗi 3 giây)
+  let iotTablesEnsuredPromise = null;
   async function ensureIotTables() {
+    if (iotTablesEnsuredPromise) {
+      return iotTablesEnsuredPromise;
+    }
+    iotTablesEnsuredPromise = (async () => {
     try {
       await pool.query(`
         CREATE TABLE IF NOT EXISTS locations (
@@ -2063,7 +2068,11 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
       `);
 
       try {
-        await pool.query("ALTER TABLE locations ADD COLUMN customer_pass VARCHAR(255) DEFAULT '3AH@me' AFTER customer_email");
+        const [locCols] = await pool.query('SHOW COLUMNS FROM locations');
+        const locColNames = locCols.map((c) => c.Field);
+        if (!locColNames.includes('customer_pass')) {
+          await pool.query("ALTER TABLE locations ADD COLUMN customer_pass VARCHAR(255) DEFAULT '3AH@me' AFTER customer_email");
+        }
       } catch (e) {
         // Cột customer_pass đã tồn tại
       }
@@ -2121,30 +2130,44 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
           try { await pool.query('ALTER TABLE telemetry_data ADD INDEX idx_telemetry_dev_time (device_id, recorded_at)'); } catch { /* ignore */ }
           try { await pool.query('ALTER TABLE telemetry_data ADD CONSTRAINT fk_telemetry_device FOREIGN KEY (device_id) REFERENCES devices (device_id) ON DELETE CASCADE'); } catch { /* ignore */ }
         }
+
+        const dataColsToAdd = [
+          { name: 'show', def: '`show` TEXT DEFAULT NULL' },
+          { name: 'raw_data', def: 'raw_data TEXT DEFAULT NULL' },
+          { name: 'meter', def: 'meter TEXT DEFAULT NULL' },
+          { name: 'control', def: 'control TEXT DEFAULT NULL' }
+        ];
+        for (const col of dataColsToAdd) {
+          if (!tdColNames.includes(col.name)) {
+            try {
+              await pool.query(`ALTER TABLE telemetry_data ADD COLUMN ${col.def}`);
+            } catch {
+              // Cột đã tồn tại
+            }
+          }
+        }
+
+        // Nếu cột note cũ còn tồn tại, chuyển dữ liệu sang cột meter trước khi xoá cột note
+        if (tdColNames.includes('note')) {
+          try {
+            await pool.query("UPDATE telemetry_data SET meter = note WHERE (meter IS NULL OR meter = '') AND note IS NOT NULL AND note <> ''");
+          } catch {
+            // ignore
+          }
+        }
+
+        const oldColsToDrop = ['temperature', 'humidity', 'power', 'voltage', 'current', 'note'];
+        for (const colName of oldColsToDrop) {
+          if (tdColNames.includes(colName)) {
+            try {
+              await pool.query(`ALTER TABLE telemetry_data DROP COLUMN \`${colName}\``);
+            } catch {
+              // Cột đã được xoá
+            }
+          }
+        }
       } catch {
         // ignore
-      }
-
-      const dataColsToAdd = [
-        "`show` TEXT DEFAULT NULL",
-        "raw_data TEXT DEFAULT NULL",
-        "meter TEXT DEFAULT NULL",
-        "control TEXT DEFAULT NULL"
-      ];
-      for (const colDef of dataColsToAdd) {
-        try {
-          await pool.query(`ALTER TABLE telemetry_data ADD COLUMN ${colDef}`);
-        } catch {
-          // Cột đã tồn tại
-        }
-      }
-      const oldColsToDrop = ['temperature', 'humidity', 'power', 'voltage', 'current', 'note'];
-      for (const colName of oldColsToDrop) {
-        try {
-          await pool.query(`ALTER TABLE telemetry_data DROP COLUMN \`${colName}\``);
-        } catch {
-          // Cột đã được xoá
-        }
       }
 
       // Chuyển dữ liệu (nếu có) từ bảng telemetry_history sang telemetry_data rồi xoá bảng telemetry_history
@@ -2226,8 +2249,11 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
         `, [g3Id, g3Id]);
       }
     } catch (err) {
+      iotTablesEnsuredPromise = null;
       console.error('Lỗi khởi tạo bảng IoT:', err.message);
     }
+    })();
+    return iotTablesEnsuredPromise;
   }
 
   // Gọi ensureIotTables khi khởi tạo router
