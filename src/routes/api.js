@@ -2166,6 +2166,13 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
             }
           }
         }
+
+        // Bỏ ON UPDATE CURRENT_TIMESTAMP ở cột recorded_at (nếu có từ schema cũ) để tránh ghi đè thời gian lịch sử khi UPDATE meter/control
+        try {
+          await pool.query('ALTER TABLE telemetry_data MODIFY COLUMN recorded_at DATETIME DEFAULT CURRENT_TIMESTAMP');
+        } catch {
+          // ignore
+        }
       } catch {
         // ignore
       }
@@ -2819,6 +2826,7 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
         values.push(normalizeInputVal(control));
       }
       if (setClauses.length > 0) {
+        setClauses.push('recorded_at = recorded_at');
         const placeholders = targetIds.map(() => '?').join(',');
         await pool.query(
           `UPDATE telemetry_data SET ${setClauses.join(', ')} WHERE device_id IN (${placeholders})`,
