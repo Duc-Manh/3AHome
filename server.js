@@ -468,23 +468,72 @@ async function handleIncomingMqttTelemetry(topic, msgStr, sourceLabel = 'MQTT') 
 
     const { pool: dbPool } = await import('./src/config/db.js');
     const parts = topic.split('/').filter(Boolean);
-    const isCmdTopic =
-      parts.length >= 5 &&
-      parts[0] === '3ahome' &&
-      parts[1] === 'telemetry' &&
-      parts[3] === 'cmd';
-    const cmdChannel = isCmdTopic ? String(parts[4]).toLowerCase() : null;
+    const isTelemetryPrefix =
+      parts.length >= 3 &&
+      parts[0].toLowerCase() === '3ahome' &&
+      parts[1].toLowerCase() === 'telemetry';
+    const isGwPrefix =
+      parts.length >= 3 &&
+      parts[0].toLowerCase() === '3ahome' &&
+      parts[1].toLowerCase() === 'gw';
+
+    const cmdIdx = isTelemetryPrefix
+      ? parts.findIndex((p, idx) => idx >= 3 && p.toLowerCase() === 'cmd')
+      : isGwPrefix && parts.length >= 4 && parts[3].toLowerCase() === 'cmd'
+      ? 3
+      : -1;
+    const isCmdTopic = cmdIdx !== -1;
+    const cmdChannel =
+      isCmdTopic && isTelemetryPrefix && parts.length > cmdIdx + 1
+        ? String(parts[cmdIdx + 1]).toLowerCase()
+        : null;
+
+    let topicGwSn = null;
+    let topicDevCode = null;
+    if (isTelemetryPrefix) {
+      if (isCmdTopic) {
+        if (cmdIdx === 3) {
+          topicDevCode = parts[2];
+        } else if (cmdIdx >= 4) {
+          topicGwSn = parts[2];
+          topicDevCode = parts[cmdIdx - 1];
+        }
+      } else if (parts.length === 3) {
+        topicDevCode = parts[2];
+      } else if (parts.length >= 4) {
+        topicGwSn = parts[2];
+        topicDevCode = parts[3];
+      }
+    } else if (isGwPrefix) {
+      topicGwSn = parts[2];
+      if (!isCmdTopic && parts.length >= 5 && parts[3].toLowerCase() === 'telemetry') {
+        topicDevCode = parts[4];
+      }
+    }
+
+    let rawGwSn =
+      (typeof data === 'object' && data !== null
+        ? data.gateway_sn || data.gatewaySn || data.gw_sn
+        : null) || topicGwSn;
+    if (!rawGwSn && typeof sourceLabel === 'string' && /^MQTT:gw[_-]/i.test(sourceLabel)) {
+      rawGwSn = sourceLabel.replace(/^MQTT:gw[_-]/i, '').trim();
+    }
+    const formattedGwSn = rawGwSn
+      ? String(rawGwSn)
+          .trim()
+          .toUpperCase()
+          .replace(/[^A-Z0-9_\-]/g, '')
+          .slice(0, 100)
+      : '';
 
     let devCode =
       typeof data === 'object' && data !== null
         ? data.device_code || data.deviceId || data.deviceCode
         : null;
-    if (!devCode && parts.length > 0) {
-      if (isCmdTopic) {
-        devCode = parts[2];
-      } else if (parts[0] === '3ahome' && parts[1] === 'telemetry' && parts.length >= 3) {
-        devCode = parts[2];
-      } else {
+    if (!devCode) {
+      if (topicDevCode) {
+        devCode = topicDevCode;
+      } else if (parts.length > 0 && !isGwPrefix) {
         devCode = parts[parts.length - 1];
       }
     }
@@ -499,13 +548,55 @@ async function handleIncomingMqttTelemetry(topic, msgStr, sourceLabel = 'MQTT') 
       }
 
       const [devRows] = await dbPool.query(
-        'SELECT device_id FROM devices WHERE device_code = ?',
+        'SELECT device_id, gateway_id FROM devices WHERE device_code = ?',
         [formattedDevCode]
       );
       let devId;
       if (devRows.length > 0) {
         devId = devRows[0].device_id;
+        if (!isCmdTopic && devRows[0].gateway_id) {
+          dbPool
+            .query("UPDATE gateways SET status = 'online', last_seen = NOW() WHERE gateway_id = ?", [
+              devRows[0].gateway_id
+            ])
+            .catch(() => {});
+        }
       } else {
+        let targetGatewayId = null;
+        if (formattedGwSn && formattedGwSn.length >= 2) {
+          const [gwRows] = await dbPool.query(
+            'SELECT gateway_id FROM gateways WHERE gateway_sn = ? LIMIT 1',
+            [formattedGwSn]
+          );
+          if (gwRows.length > 0) {
+            targetGatewayId = gwRows[0].gateway_id;
+            dbPool
+              .query("UPDATE gateways SET status = 'online', last_seen = NOW() WHERE gateway_id = ?", [
+                targetGatewayId
+              ])
+              .catch(() => {});
+          } else {
+            const [insGw] = await dbPool.query(
+              "INSERT INTO gateways (gateway_sn, status, last_seen) VALUES (?, 'online', NOW())",
+              [formattedGwSn]
+            );
+            targetGatewayId = insGw.insertId;
+          }
+        }
+        if (!targetGatewayId) {
+          const [fallbackGws] = await dbPool.query(
+            'SELECT gateway_id FROM gateways ORDER BY gateway_id ASC LIMIT 1'
+          );
+          if (fallbackGws.length > 0) {
+            targetGatewayId = fallbackGws[0].gateway_id;
+          } else {
+            const [insDefaultGw] = await dbPool.query(
+              "INSERT INTO gateways (gateway_sn, status, last_seen) VALUES ('GW_DEFAULT', 'online', NOW())"
+            );
+            targetGatewayId = insDefaultGw.insertId;
+          }
+        }
+
         const devName =
           typeof data === 'object' && data !== null && data.device_name
             ? data.device_name
@@ -518,18 +609,24 @@ async function handleIncomingMqttTelemetry(topic, msgStr, sourceLabel = 'MQTT') 
           typeof data === 'object' && data !== null && data.floor
             ? data.floor
             : 'Khu vực chính';
+        const devSlave =
+          typeof data === 'object' && data !== null && Number(data.slave_address) > 0
+            ? Number(data.slave_address)
+            : 1;
         const [insDev] = await dbPool.query(
-          'INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor) VALUES (1, ?, ?, ?, 1, ?)',
+          'INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor) VALUES (?, ?, ?, ?, ?, ?)',
           [
+            targetGatewayId,
             formattedDevCode,
             String(devName).slice(0, 100),
             String(devType).slice(0, 50),
+            devSlave,
             String(devFloor).slice(0, 50)
           ]
         );
         devId = insDev.insertId;
         console.log(
-          `✨ [MQTT Auto-Register] Đã tạo thiết bị mới [${formattedDevCode}] vào bảng devices (device_id: ${devId})!`
+          `✨ [MQTT Auto-Register] Đã tạo thiết bị mới [${formattedDevCode}] thuộc gateway_id=${targetGatewayId} (device_id: ${devId})!`
         );
       }
 
@@ -561,6 +658,35 @@ async function handleIncomingMqttTelemetry(topic, msgStr, sourceLabel = 'MQTT') 
           }
           return trimmed;
         };
+        const parseControlChannelSet = (rawCtrl) => {
+          const set = new Set();
+          if (!rawCtrl) return set;
+          const str = typeof rawCtrl === 'object' ? JSON.stringify(rawCtrl) : String(rawCtrl).trim();
+          try {
+            const parsed = JSON.parse(str);
+            if (Array.isArray(parsed)) {
+              parsed.forEach((item) => {
+                const k = String(item || '').trim().toLowerCase();
+                if (/^m\d+$/i.test(k)) set.add(k);
+              });
+              return set;
+            }
+            if (parsed && typeof parsed === 'object') {
+              Object.keys(parsed).forEach((k) => {
+                const lk = String(k || '').trim().toLowerCase();
+                if (/^m\d+$/i.test(lk)) set.add(lk);
+              });
+              return set;
+            }
+          } catch {
+            // fallback text parsing
+          }
+          const matches = str.match(/\bm\d+\b/gi) || [];
+          matches.forEach((m) => set.add(m.toLowerCase()));
+          return set;
+        };
+
+        const mergedHistoricalShow = {};
         try {
           const [prevRows] = await dbPool.query(
             'SELECT id, `show`, meter, control FROM telemetry_data WHERE device_id = ? ORDER BY id DESC LIMIT 20',
@@ -568,23 +694,49 @@ async function handleIncomingMqttTelemetry(topic, msgStr, sourceLabel = 'MQTT') 
           );
           if (prevRows.length > 0) {
             latestRowId = prevRows[0].id;
-            if (prevRows[0].show) {
-              prevShowObj =
-                typeof prevRows[0].show === 'string'
-                  ? JSON.parse(prevRows[0].show)
-                  : prevRows[0].show;
-            }
             for (const pr of prevRows) {
               if (!existingMeter) existingMeter = normalizeMeterControl(pr.meter);
               if (!existingControl) existingControl = normalizeMeterControl(pr.control);
-              if (existingMeter && existingControl) break;
+              try {
+                const rowShow =
+                  pr.show && typeof pr.show === 'string'
+                    ? JSON.parse(pr.show)
+                    : pr.show && typeof pr.show === 'object'
+                    ? pr.show
+                    : null;
+                if (rowShow && typeof rowShow === 'object') {
+                  Object.entries(rowShow).forEach(([rk, rv]) => {
+                    const lk = String(rk || '').trim().toLowerCase();
+                    if (lk && !(lk in mergedHistoricalShow) && rv !== null && rv !== undefined && String(rv).trim() !== '') {
+                      mergedHistoricalShow[lk] = rv;
+                    }
+                  });
+                }
+              } catch {
+                // ignore row parse error
+              }
             }
+            prevShowObj = mergedHistoricalShow;
           }
         } catch {
           // ignore
         }
 
-        const showObj = isCmdTopic ? { ...(prevShowObj || {}) } : {};
+        const controlChannelSet = parseControlChannelSet(existingControl);
+        const preservedControlState = {};
+        controlChannelSet.forEach((ch) => {
+          if (ch in prevShowObj) {
+            preservedControlState[ch] = prevShowObj[ch];
+          } else {
+            preservedControlState[ch] = 0;
+          }
+        });
+
+        // Nếu là gói đo lường từ Gateway (!isCmdTopic): giữ nguyên trạng thái kênh điều khiển (ON chỉ OFF khi có người OFF, OFF chỉ ON khi có người ON)
+        const showObj = isCmdTopic
+          ? { ...(prevShowObj || {}) }
+          : { ...preservedControlState };
+
         if (typeof data === 'object' && data !== null) {
           const sourceData =
             data.measurements && typeof data.measurements === 'object'
@@ -593,16 +745,28 @@ async function handleIncomingMqttTelemetry(topic, msgStr, sourceLabel = 'MQTT') 
           const ignoredKeys = new Set([
             'device_code',
             'device_id',
-            'deviceId',
-            'deviceCode',
+            'deviceid',
+            'devicecode',
             'device_name',
             'device_type',
+            'slave_address',
+            'gateway_sn',
+            'gatewaysn',
+            'gw_sn',
+            'timestamp',
+            'ts',
+            'time',
             'floor',
             'measurements'
           ]);
           Object.keys(sourceData || {}).forEach((k) => {
-            if (!ignoredKeys.has(k) && sourceData[k] !== undefined) {
-              showObj[k] = sourceData[k];
+            const lk = String(k || '').trim().toLowerCase();
+            if (!ignoredKeys.has(lk) && sourceData[k] !== undefined) {
+              if (!isCmdTopic && controlChannelSet.has(lk)) {
+                // Không cho gói đo lường định kỳ từ Gateway tự ý bật/tắt kênh điều khiển
+                return;
+              }
+              showObj[lk] = sourceData[k];
             }
           });
         } else if (cmdChannel) {
@@ -620,7 +784,7 @@ async function handleIncomingMqttTelemetry(topic, msgStr, sourceLabel = 'MQTT') 
         let recordId = latestRowId;
         if (isCmdTopic && latestRowId) {
           await dbPool.query(
-            'UPDATE telemetry_data SET `show` = ?, raw_data = ?, recorded_at = NOW() WHERE id = ?',
+            'UPDATE telemetry_data SET `show` = ?, raw_data = ?, recorded_at = recorded_at WHERE id = ?',
             [showJsonStr, rawJsonStr, latestRowId]
           );
         } else {
@@ -643,6 +807,7 @@ async function handleIncomingMqttTelemetry(topic, msgStr, sourceLabel = 'MQTT') 
           device_id: devId,
           device_code: formattedDevCode,
           topic,
+          is_control_command: Boolean(isCmdTopic),
           show: showObj,
           raw_data: rawPayload,
           measurements: showObj,
@@ -658,7 +823,7 @@ async function handleIncomingMqttTelemetry(topic, msgStr, sourceLabel = 'MQTT') 
 }
 
 aedesBroker.on('publish', async (packet, client) => {
-  if (client) {
+  if (client && !packet.retain) {
     const topic = packet.topic;
     const msgStr = packet.payload.toString().trim();
     await handleIncomingMqttTelemetry(topic, msgStr, `MQTT:${client.id}`);
@@ -764,9 +929,10 @@ function startExternalMqttSubscriberBridge(host, port) {
               }
             }, 25000);
           } else if (packetType === 0x30 && body.length >= 2) {
-            // PUBLISH (0x30)
+            // PUBLISH (0x30) - Bỏ qua bản tin retained cũ từ broker ngoài để tránh tự động đảo trạng thái ON/OFF
+            const isRetained = (byte0 & 0x01) === 1;
             const topicLen = (body[0] << 8) | body[1];
-            if (body.length >= 2 + topicLen) {
+            if (!isRetained && body.length >= 2 + topicLen) {
               const topic = body.subarray(2, 2 + topicLen).toString('utf8');
               const qos = (byte0 >> 1) & 0x03;
               const payloadStart = 2 + topicLen + (qos > 0 ? 2 : 0);

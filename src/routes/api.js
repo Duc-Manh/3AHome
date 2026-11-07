@@ -2512,19 +2512,65 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
 
   // 7. Nhận số liệu viễn trắc (Telemetry) từ Gateway / Cảm biến / MQTTX lưu vào bảng telemetry_data (Upsert 1 hàng/device_id)
   router.post('/telemetry-data', async (req, res) => {
-    const { device_code, device_id, param_name, param_value, measurements } = req.body;
+    const { device_code, device_id, gateway_sn, param_name, param_value, measurements } = req.body;
     try {
       let targetDeviceId = device_id;
 
-      // Nếu truyền mã device_code, tự tìm device_id tương ứng trong bảng devices
+      // Nếu truyền mã device_code, tự tìm device_id tương ứng trong bảng devices (hỗ trợ gắn theo gateway_sn của từng dự án)
       if (!targetDeviceId && device_code) {
-        const [devs] = await pool.query('SELECT device_id FROM devices WHERE device_code = ?', [String(device_code).toUpperCase()]);
+        const cleanDevCode = String(device_code).trim().toUpperCase();
+        const [devs] = await pool.query(
+          'SELECT device_id, gateway_id FROM devices WHERE device_code = ?',
+          [cleanDevCode]
+        );
         if (devs.length > 0) {
           targetDeviceId = devs[0].device_id;
+          if (devs[0].gateway_id) {
+            pool
+              .query("UPDATE gateways SET status = 'online', last_seen = NOW() WHERE gateway_id = ?", [
+                devs[0].gateway_id
+              ])
+              .catch(() => {});
+          }
         } else {
+          let targetGwId = null;
+          const cleanGwSn = gateway_sn ? String(gateway_sn).trim().toUpperCase() : '';
+          if (cleanGwSn) {
+            const [gwRows] = await pool.query(
+              'SELECT gateway_id FROM gateways WHERE gateway_sn = ? LIMIT 1',
+              [cleanGwSn]
+            );
+            if (gwRows.length > 0) {
+              targetGwId = gwRows[0].gateway_id;
+              pool
+                .query("UPDATE gateways SET status = 'online', last_seen = NOW() WHERE gateway_id = ?", [
+                  targetGwId
+                ])
+                .catch(() => {});
+            } else {
+              const [insGw] = await pool.query(
+                "INSERT INTO gateways (gateway_sn, status, last_seen) VALUES (?, 'online', NOW())",
+                [cleanGwSn]
+              );
+              targetGwId = insGw.insertId;
+            }
+          }
+          if (!targetGwId) {
+            const [fallbackGws] = await pool.query(
+              'SELECT gateway_id FROM gateways ORDER BY gateway_id ASC LIMIT 1'
+            );
+            if (fallbackGws.length > 0) {
+              targetGwId = fallbackGws[0].gateway_id;
+            } else {
+              const [insDefaultGw] = await pool.query(
+                "INSERT INTO gateways (gateway_sn, status, last_seen) VALUES ('GW_DEFAULT', 'online', NOW())"
+              );
+              targetGwId = insDefaultGw.insertId;
+            }
+          }
           const [insDev] = await pool.query(
-            'INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor) VALUES (1, ?, ?, ?, 1, ?)',
-            [String(device_code).toUpperCase(), `Thiết bị ${device_code}`, 'sensor', 'Khu vực chính']
+            'INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor) VALUES (?, ?, ?, ?, 1, ?)',
+            [targetGwId, cleanDevCode, `Thiết bị ${cleanDevCode}`, 'sensor', 'Khu vực chính']
           );
           targetDeviceId = insDev.insertId;
         }
@@ -2533,28 +2579,6 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
       if (!targetDeviceId) {
         return res.status(400).json({ success: false, message: 'Vui lòng cung cấp device_code hoặc device_id' });
       }
-
-      const sourceData = measurements && typeof measurements === 'object' ? measurements : req.body;
-      const showObj = {};
-      const ignoredKeys = new Set(['device_code', 'device_id', 'deviceId', 'deviceCode', 'device_name', 'device_type', 'floor', 'param_name', 'param_value', 'measurements']);
-
-      Object.keys(sourceData || {}).forEach((k) => {
-        if (!ignoredKeys.has(k) && sourceData[k] !== undefined) {
-          showObj[k] = sourceData[k];
-        }
-      });
-
-      if (param_name && param_value !== undefined) {
-        showObj[param_name] = Number(param_value);
-      }
-
-      const rawPayload = {
-        device_code: device_code ? String(device_code).toUpperCase() : `DEV_${targetDeviceId}`,
-        ...showObj
-      };
-
-      const showJsonStr = JSON.stringify(showObj);
-      const rawJsonStr = JSON.stringify(rawPayload);
 
       const normalizeDbMeterControl = (val) => {
         if (val === null || val === undefined) return null;
@@ -2580,22 +2604,115 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
         return trimmed;
       };
 
-      // Giữ lại giá trị meter, control gần nhất của thiết bị nếu đã có
+      const parseControlChannelSet = (rawCtrl) => {
+        const set = new Set();
+        if (!rawCtrl) return set;
+        const str = typeof rawCtrl === 'object' ? JSON.stringify(rawCtrl) : String(rawCtrl).trim();
+        try {
+          const parsed = JSON.parse(str);
+          if (Array.isArray(parsed)) {
+            parsed.forEach((item) => {
+              const k = String(item || '').trim().toLowerCase();
+              if (/^m\d+$/i.test(k)) set.add(k);
+            });
+            return set;
+          }
+          if (parsed && typeof parsed === 'object') {
+            Object.keys(parsed).forEach((k) => {
+              const lk = String(k || '').trim().toLowerCase();
+              if (/^m\d+$/i.test(lk)) set.add(lk);
+            });
+            return set;
+          }
+        } catch {
+          // fallback text parsing
+        }
+        const matches = str.match(/\bm\d+\b/gi) || [];
+        matches.forEach((m) => set.add(m.toLowerCase()));
+        return set;
+      };
+
+      // Giữ lại giá trị meter, control và trạng thái kênh điều khiển gần nhất của thiết bị
       let existingMeter = null;
       let existingControl = null;
+      const mergedHistoricalShow = {};
       try {
         const [prevRows] = await pool.query(
-          'SELECT meter, control FROM telemetry_data WHERE device_id = ? ORDER BY id DESC LIMIT 20',
+          'SELECT `show`, meter, control FROM telemetry_data WHERE device_id = ? ORDER BY id DESC LIMIT 20',
           [targetDeviceId]
         );
         for (const pr of prevRows) {
           if (!existingMeter) existingMeter = normalizeDbMeterControl(pr.meter);
           if (!existingControl) existingControl = normalizeDbMeterControl(pr.control);
-          if (existingMeter && existingControl) break;
+          try {
+            const rowShow =
+              pr.show && typeof pr.show === 'string'
+                ? JSON.parse(pr.show)
+                : pr.show && typeof pr.show === 'object'
+                ? pr.show
+                : null;
+            if (rowShow && typeof rowShow === 'object') {
+              Object.entries(rowShow).forEach(([rk, rv]) => {
+                const lk = String(rk || '').trim().toLowerCase();
+                if (lk && !(lk in mergedHistoricalShow) && rv !== null && rv !== undefined && String(rv).trim() !== '') {
+                  mergedHistoricalShow[lk] = rv;
+                }
+              });
+            }
+          } catch {
+            // ignore row parse error
+          }
         }
       } catch {
         // ignore
       }
+
+      const controlChannelSet = parseControlChannelSet(existingControl);
+      const preservedControlState = {};
+      controlChannelSet.forEach((ch) => {
+        preservedControlState[ch] = ch in mergedHistoricalShow ? mergedHistoricalShow[ch] : 0;
+      });
+
+      // Tín hiệu đo lường từ Gateway chỉ cập nhật kênh đo lường, giữ nguyên trạng thái kênh điều khiển (ON chỉ OFF khi có người OFF, OFF chỉ ON khi có người ON)
+      const sourceData = measurements && typeof measurements === 'object' ? measurements : req.body;
+      const showObj = { ...preservedControlState };
+      const ignoredKeys = new Set([
+        'device_code',
+        'device_id',
+        'deviceid',
+        'devicecode',
+        'device_name',
+        'device_type',
+        'floor',
+        'param_name',
+        'param_value',
+        'measurements'
+      ]);
+
+      Object.keys(sourceData || {}).forEach((k) => {
+        const lk = String(k || '').trim().toLowerCase();
+        if (!ignoredKeys.has(lk) && sourceData[k] !== undefined) {
+          if (controlChannelSet.has(lk)) {
+            return;
+          }
+          showObj[lk] = sourceData[k];
+        }
+      });
+
+      if (param_name && param_value !== undefined) {
+        const lkParam = String(param_name).trim().toLowerCase();
+        if (!controlChannelSet.has(lkParam)) {
+          showObj[lkParam] = Number(param_value);
+        }
+      }
+
+      const rawPayload = {
+        device_code: device_code ? String(device_code).toUpperCase() : `DEV_${targetDeviceId}`,
+        ...showObj
+      };
+
+      const showJsonStr = JSON.stringify(showObj);
+      const rawJsonStr = JSON.stringify(rawPayload);
 
       const [insRes] = await pool.query(`
         INSERT INTO telemetry_data (device_id, \`show\`, raw_data, meter, control, recorded_at)
@@ -2615,6 +2732,7 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
           id: insRes.insertId || Date.now(),
           device_id: targetDeviceId,
           device_code: device_code ? String(device_code).toUpperCase() : `DEV_${targetDeviceId}`,
+          is_control_command: false,
           show: showObj,
           raw_data: rawPayload,
           measurements: showObj,
@@ -3177,22 +3295,68 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
       }
 
       const cmdTopic = `3ahome/telemetry/${formattedDevCode}/cmd/${formattedChannel}`;
+      const jsonCmdTopic = `3ahome/telemetry/${formattedDevCode}/cmd`;
 
-      // 1. Publish lệnh điều khiển kiểu number qua MQTT Broker
-      if (typeof publishMqttCommand === 'function') {
-        publishMqttCommand(cmdTopic, numericValue, Boolean(mqtt_published));
-      }
-
-      // 2. Đồng bộ giá trị kênh điều khiển vào bảng telemetry_data trong MySQL
+      // 1. Tra cứu thiết bị & Gateway quản lý thiết bị này trong bảng devices / gateways
       const [devRows] = await pool.query(
-        'SELECT device_id FROM devices WHERE device_code = ? LIMIT 1',
+        `SELECT d.device_id, g.gateway_sn
+         FROM devices d
+         LEFT JOIN gateways g ON d.gateway_id = g.gateway_id
+         WHERE d.device_code = ?
+         LIMIT 1`,
         [formattedDevCode]
       );
 
-      if (devRows.length > 0) {
-        const devId = devRows[0].device_id;
+      let devId = devRows.length > 0 ? devRows[0].device_id : null;
+      const gatewaySn =
+        devRows.length > 0 && devRows[0].gateway_sn
+          ? String(devRows[0].gateway_sn).trim().toUpperCase()
+          : '';
+
+      // 2. Publish lệnh điều khiển xuống Gateway:
+      // - Topic đơn kênh dạng số: 3ahome/telemetry/<DEVICE_CODE>/cmd/<mX>
+      // - Topic JSON theo thiết bị: 3ahome/telemetry/<DEVICE_CODE>/cmd
+      // - Topic JSON gộp theo Gateway (nếu Gateway quản lý nhiều Slave trên 1 kết nối): 3ahome/gw/<GATEWAY_SN>/cmd
+      if (typeof publishMqttCommand === 'function') {
+        publishMqttCommand(cmdTopic, numericValue, Boolean(mqtt_published));
+        publishMqttCommand(jsonCmdTopic, { [formattedChannel]: numericValue }, false);
+        if (gatewaySn && gatewaySn !== 'CHƯA_GÁN') {
+          publishMqttCommand(
+            `3ahome/gw/${gatewaySn}/cmd`,
+            {
+              device_code: formattedDevCode,
+              channel: formattedChannel,
+              value: numericValue,
+              [formattedChannel]: numericValue
+            },
+            false
+          );
+        }
+      }
+
+      if (!devId) {
+        let targetGwId = null;
+        const [fallbackGws] = await pool.query(
+          'SELECT gateway_id FROM gateways ORDER BY gateway_id ASC LIMIT 1'
+        );
+        if (fallbackGws.length > 0) {
+          targetGwId = fallbackGws[0].gateway_id;
+        } else {
+          const [insDefaultGw] = await pool.query(
+            "INSERT INTO gateways (gateway_sn, status, last_seen) VALUES ('GW_DEFAULT', 'online', NOW())"
+          );
+          targetGwId = insDefaultGw.insertId;
+        }
+        const [insDev] = await pool.query(
+          'INSERT INTO devices (gateway_id, device_code, device_name, device_type, slave_address, floor) VALUES (?, ?, ?, ?, 1, ?)',
+          [targetGwId, formattedDevCode, `Thiết bị ${formattedDevCode}`, 'sensor', 'Khu vực chính']
+        );
+        devId = insDev.insertId;
+      }
+
+      if (devId) {
         const [latestRows] = await pool.query(
-          'SELECT id, `show`, raw_data, meter, control FROM telemetry_data WHERE device_id = ? ORDER BY id DESC LIMIT 1',
+          'SELECT id, `show`, raw_data, meter, control, recorded_at FROM telemetry_data WHERE device_id = ? ORDER BY id DESC LIMIT 20',
           [devId]
         );
 
@@ -3202,26 +3366,38 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
         let existingControl = null;
 
         if (latestRows.length > 0) {
-          existingMeter =
-            latestRows[0].meter !== null && latestRows[0].meter !== undefined
-              ? typeof latestRows[0].meter === 'object'
-                ? JSON.stringify(latestRows[0].meter)
-                : String(latestRows[0].meter)
-              : null;
-          existingControl =
-            latestRows[0].control !== null && latestRows[0].control !== undefined
-              ? typeof latestRows[0].control === 'object'
-                ? JSON.stringify(latestRows[0].control)
-                : String(latestRows[0].control)
-              : null;
-          try {
-            if (latestRows[0].show) {
-              showObj = typeof latestRows[0].show === 'string' ? JSON.parse(latestRows[0].show) : { ...latestRows[0].show };
+          for (const row of latestRows) {
+            if (!existingMeter && row.meter !== null && row.meter !== undefined) {
+              const s = typeof row.meter === 'object' ? JSON.stringify(row.meter) : String(row.meter).trim();
+              if (s && s !== '{}' && s !== '[]' && s !== 'null') existingMeter = s;
             }
-          } catch {}
+            if (!existingControl && row.control !== null && row.control !== undefined) {
+              const s = typeof row.control === 'object' ? JSON.stringify(row.control) : String(row.control).trim();
+              if (s && s !== '{}' && s !== '[]' && s !== 'null') existingControl = s;
+            }
+            try {
+              const parsedShow =
+                row.show && typeof row.show === 'string'
+                  ? JSON.parse(row.show)
+                  : row.show && typeof row.show === 'object'
+                  ? row.show
+                  : null;
+              if (parsedShow && typeof parsedShow === 'object') {
+                Object.entries(parsedShow).forEach(([rk, rv]) => {
+                  const lk = String(rk || '').trim().toLowerCase();
+                  if (lk && !(lk in showObj) && rv !== null && rv !== undefined && String(rv).trim() !== '') {
+                    showObj[lk] = rv;
+                  }
+                });
+              }
+            } catch {}
+          }
           try {
             if (latestRows[0].raw_data) {
-              rawObj = typeof latestRows[0].raw_data === 'string' ? JSON.parse(latestRows[0].raw_data) : { ...latestRows[0].raw_data };
+              rawObj =
+                typeof latestRows[0].raw_data === 'string'
+                  ? JSON.parse(latestRows[0].raw_data)
+                  : { ...latestRows[0].raw_data };
             }
           } catch {}
         }
@@ -3239,7 +3415,7 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
 
         if (latestRows.length > 0) {
           await pool.query(
-            'UPDATE telemetry_data SET `show` = ?, raw_data = ?, recorded_at = NOW() WHERE id = ?',
+            'UPDATE telemetry_data SET `show` = ?, raw_data = ?, recorded_at = recorded_at WHERE id = ?',
             [showJsonStr, rawJsonStr, latestRows[0].id]
           );
         } else {
@@ -3254,20 +3430,27 @@ export function createApiRouter(broadcastWs, publishMqttCommand) {
             type: 'TELEMETRY_DATA_SAVED',
             device_id: devId,
             device_code: formattedDevCode,
+            topic: cmdTopic,
+            is_control_command: true,
+            control_channel: formattedChannel,
+            control_value: numericValue,
             show: showObj,
             raw_data: rawObj,
             measurements: showObj,
             meter: existingMeter,
             control: existingControl,
-            recorded_at: new Date().toISOString()
+            recorded_at: latestRows.length > 0 && latestRows[0].recorded_at
+              ? latestRows[0].recorded_at
+              : new Date().toISOString()
           });
         }
       }
 
-      console.log(`🎛️ [Device Control] Đã xuất lệnh MQTT [${cmdTopic}] = ${numericValue}`);
+      console.log(`🎛️ [Device Control] Đã xuất lệnh MQTT [${cmdTopic}] & [${jsonCmdTopic}] = ${numericValue}`);
       return res.json({
         success: true,
         topic: cmdTopic,
+        json_topic: jsonCmdTopic,
         device_code: formattedDevCode,
         channel: formattedChannel,
         value: numericValue
